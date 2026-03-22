@@ -1,0 +1,369 @@
+/* ── Reset & base ─────────────────────────────────────────────────────── */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+  background: #fff;
+  color: #1a1a1a;
+}
+
+/* ── App shell ────────────────────────────────────────────────────────── */
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 20px;
+  border-bottom: 1px solid #e1e4e8;
+  background: #f6f8fa;
+  flex-shrink: 0;
+}
+
+.app-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #24292e;
+  letter-spacing: -0.01em;
+}
+
+.app-content {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Mode selector ────────────────────────────────────────────────────── */
+.mode-selector {
+  display: flex;
+  gap: 2px;
+  background: #e1e4e8;
+  border-radius: 6px;
+  padding: 3px;
+}
+
+.mode-btn {
+  padding: 5px 14px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  color: #57606a;
+  background: transparent;
+  transition: background 0.12s, color 0.12s, box-shadow 0.12s;
+  white-space: nowrap;
+}
+
+.mode-btn:hover {
+  color: #24292e;
+}
+
+.mode-btn.active {
+  background: #fff;
+  color: #24292e;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+/* ── Source editor ────────────────────────────────────────────────────── */
+.source-editor {
+  width: 100%;
+  height: 100%;
+  padding: 32px 60px;
+  font-family: 'SFMono-Regular', 'Consolas', 'Liberation Mono', 'Menlo', monospace;
+  font-size: 14px;
+  line-height: 1.7;
+  border: none;
+  outline: none;
+  resize: none;
+  background: #1e1e2e;
+  color: #cdd6f4;
+  tab-size: 2;
+}
+
+/* ── Shared prose area ────────────────────────────────────────────────── */
+.rich-editor-wrapper,
+.reader-wrapper {
+  flex: 1;
+  overflow-y: auto;
+  height: 100%;
+}
+
+.rich-editor,
+.reader-view {
+  max-width: 780px;
+  margin: 0 auto;
+  padding: 48px 60px;
+  position: relative;
+}
+
+/* The Lexical ContentEditable div */
+.rich-editor-content {
+  outline: none;
+  min-height: 300px;
+}
+
+.reader-content {
+  outline: none;
+  cursor: default;
+}
+
+.editor-placeholder {
+  color: #adb5bd;
+  position: absolute;
+  top: 48px;
+  left: 60px;
+  pointer-events: none;
+  user-select: none;
+  font-size: 16px;
+}
+
+/* ── Typography (shared between rich and reader) ──────────────────────── */
+.editor-paragraph {
+  margin: 0 0 12px;
+  font-size: 16px;
+  line-height: 1.75;
+}
+
+.editor-h1,
+.editor-h2,
+.editor-h3,
+.editor-h4,
+.editor-h5,
+.editor-h6 {
+  font-weight: 700;
+  line-height: 1.3;
+  margin: 1.4em 0 0.4em;
+}
+
+.editor-h1 { font-size: 2em; }
+.editor-h2 { font-size: 1.5em; }
+.editor-h3 { font-size: 1.25em; }
+.editor-h4 { font-size: 1.1em; }
+.editor-h5 { font-size: 1em; }
+.editor-h6 { font-size: 0.9em; color: #57606a; }
+
+.editor-quote {
+  border-left: 4px solid #d0d7de;
+  margin: 12px 0;
+  padding: 4px 16px;
+  color: #57606a;
+  font-style: italic;
+}
+
+.editor-code {
+  display: block;
+  background: #f6f8fa;
+  border: 1px solid #e1e4e8;
+  border-radius: 6px;
+  padding: 14px 18px;
+  font-family: 'SFMono-Regular', 'Consolas', 'Liberation Mono', 'Menlo', monospace;
+  font-size: 13.5px;
+  line-height: 1.6;
+  overflow-x: auto;
+  white-space: pre;
+  tab-size: 2;
+  margin: 12px 0;
+}
+
+.editor-list-ol {
+  list-style-type: decimal;
+  padding-left: 24px;
+  margin: 8px 0;
+}
+
+.editor-list-ul {
+  list-style-type: disc;
+  padding-left: 24px;
+  margin: 8px 0;
+}
+
+.editor-listitem {
+  margin: 4px 0;
+  font-size: 16px;
+  line-height: 1.75;
+}
+
+.editor-nested-listitem {
+  list-style-type: none;
+}
+
+.editor-link {
+  color: #0969da;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.editor-link:hover {
+  text-decoration-thickness: 2px;
+}
+
+/* Inline text formatting */
+.editor-text-bold     { font-weight: 700; }
+.editor-text-italic   { font-style: italic; }
+.editor-text-underline { text-decoration: underline; }
+.editor-text-strikethrough { text-decoration: line-through; }
+
+.editor-text-code {
+  font-family: 'SFMono-Regular', 'Consolas', 'Liberation Mono', 'Menlo', monospace;
+  font-size: 0.875em;
+  background: #eef0f3;
+  border: 1px solid #d0d7de;
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+/* Code token colours (basic) */
+.editor-token-comment  { color: #6e7781; }
+.editor-token-attr     { color: #0550ae; }
+.editor-token-selector { color: #116329; }
+.editor-token-property { color: #0550ae; }
+.editor-token-operator { color: #24292f; }
+.editor-token-function { color: #8250df; }
+.editor-token-variable { color: #953800; }
+.editor-token-punctuation { color: #24292f; }
+
+/* ── Live Preview: markdown markers via CSS ::before / ::after ─────────
+ *
+ * Strategy
+ * ─────────
+ * The LivePreviewPlugin adds the class `active` to the DOM element that
+ * contains the cursor (and all its ancestor elements).  By default the
+ * markdown marker pseudo-elements are hidden (display:none).  When their
+ * host element gains `.active` they become visible.
+ *
+ * This gives the Obsidian "Live Preview" experience:
+ *   • Render bold text as bold everywhere.
+ *   • When the cursor enters that bold span, show grey `**` either side.
+ *   • Move the cursor away → markers vanish, text stays bold.
+ *
+ * Heading markers
+ * ───────────────
+ * `h1::before { content: "# " }` inserts text INSIDE the h1 before the
+ * real content.  Because ::before inherits font-size from the heading,
+ * the marker is automatically the same size as the heading.
+ *
+ * Inline markers
+ * ──────────────
+ * Pseudo-elements on inline spans work the same way.  They are NOT part
+ * of the DOM text, so copy/paste only copies the visible content.
+ *
+ * Why the markers are on .rich-editor descendants only
+ * ─────────────────────────────────────────────────────
+ * The reader view shares the same CSS classes but must never show
+ * markers.  Scoping to `.rich-editor` achieves that cleanly.
+ * ────────────────────────────────────────────────────────────────────── */
+
+/* Default: hidden marker pseudo-elements for headings */
+.rich-editor .editor-h1::before { content: '# '; }
+.rich-editor .editor-h2::before { content: '## '; }
+.rich-editor .editor-h3::before { content: '### '; }
+.rich-editor .editor-h4::before { content: '#### '; }
+.rich-editor .editor-h5::before { content: '##### '; }
+.rich-editor .editor-h6::before { content: '###### '; }
+
+.rich-editor .editor-h1::before,
+.rich-editor .editor-h2::before,
+.rich-editor .editor-h3::before,
+.rich-editor .editor-h4::before,
+.rich-editor .editor-h5::before,
+.rich-editor .editor-h6::before {
+  color: #9ca3af;
+  font-weight: 400;
+  display: none;
+}
+
+/* Show heading markers when cursor is in that heading */
+.rich-editor .editor-h1.active::before,
+.rich-editor .editor-h2.active::before,
+.rich-editor .editor-h3.active::before,
+.rich-editor .editor-h4.active::before,
+.rich-editor .editor-h5.active::before,
+.rich-editor .editor-h6.active::before {
+  display: inline;
+}
+
+/* Blockquote marker */
+.rich-editor .editor-quote::before {
+  content: '> ';
+  color: #9ca3af;
+  font-style: normal;
+  display: none;
+}
+.rich-editor .editor-quote.active::before {
+  display: inline;
+}
+
+/* Bold markers: **…** */
+.rich-editor .editor-text-bold::before,
+.rich-editor .editor-text-bold::after {
+  content: '**';
+  color: #9ca3af;
+  font-weight: 400;
+  display: none;
+}
+.rich-editor .editor-text-bold.active::before,
+.rich-editor .editor-text-bold.active::after {
+  display: inline;
+}
+
+/* Italic markers: *…* */
+.rich-editor .editor-text-italic::before,
+.rich-editor .editor-text-italic::after {
+  content: '*';
+  color: #9ca3af;
+  font-style: normal;
+  display: none;
+}
+.rich-editor .editor-text-italic.active::before,
+.rich-editor .editor-text-italic.active::after {
+  display: inline;
+}
+
+/* Inline code markers: `…` */
+.rich-editor .editor-text-code::before,
+.rich-editor .editor-text-code::after {
+  content: '`';
+  color: #9ca3af;
+  font-family: inherit;
+  font-size: 1em;
+  background: none;
+  border: none;
+  padding: 0;
+  display: none;
+}
+.rich-editor .editor-text-code.active::before,
+.rich-editor .editor-text-code.active::after {
+  display: inline;
+}
+
+/* Strikethrough markers: ~~…~~ */
+.rich-editor .editor-text-strikethrough::before,
+.rich-editor .editor-text-strikethrough::after {
+  content: '~~';
+  color: #9ca3af;
+  text-decoration: none;
+  display: none;
+}
+.rich-editor .editor-text-strikethrough.active::before,
+.rich-editor .editor-text-strikethrough.active::after {
+  display: inline;
+}
+
+/* Horizontal rule */
+.rich-editor hr,
+.reader-view hr {
+  border: none;
+  border-top: 2px solid #e1e4e8;
+  margin: 24px 0;
+}
