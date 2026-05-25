@@ -269,35 +269,102 @@ struct CameraInfo {
     var hasCamera: Bool { make != nil || model != nil }
 }
 
-func extractCameraInfo(for asset: PHAsset, allowNetwork: Bool) -> CameraInfo? {
-    let options = PHImageRequestOptions()
-    options.isNetworkAccessAllowed = allowNetwork
-    options.deliveryMode = .highQualityFormat
-    options.version = .current
-
-    var result: CameraInfo? = nil
-    let sem = DispatchSemaphore(value: 0)
-    _ = PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, _, _, _ in
-        defer { sem.signal() }
-        guard let data = data,
-              let src = CGImageSourceCreateWithData(data as CFData, nil),
-              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] else {
-            return
-        }
-        var info = CameraInfo()
-        if let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] {
-            info.make = (tiff[kCGImagePropertyTIFFMake] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            info.model = (tiff[kCGImagePropertyTIFFModel] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        if let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any] {
-            info.lens = exif[kCGImagePropertyExifLensModel] as? String
-            info.serial = (exif[kCGImagePropertyExifBodySerialNumber] as? String)?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        result = info
+func parseCameraInfo(_ props: [CFString: Any]) -> CameraInfo {
+    var info = CameraInfo()
+    if let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] {
+        info.make = (tiff[kCGImagePropertyTIFFMake] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        info.model = (tiff[kCGImagePropertyTIFFModel] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
     }
+    if let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any] {
+        info.lens = exif[kCGImagePropertyExifLensModel] as? String
+        info.serial = (exif[kCGImagePropertyExifBodySerialNumber] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    return info
+}
+
+func imageResource(for asset: PHAsset) -> PHAssetResource? {
+    let resources = PHAssetResource.assetResources(for: asset)
+    let priority: [PHAssetResourceType] = [.photo, .fullSizePhoto, .alternatePhoto]
+    for type in priority {
+        if let r = resources.first(where: { $0.type == type }) { return r }
+    }
+    return resources.first
+}
+
+// Reads only the EXIF/TIFF header rather than the whole image: the resource is
+// streamed in chunks into an incremental image source, and the request is
+// cancelled as soon as the camera metadata is available. For iCloud-only assets
+// this avoids downloading the full original.
+func extractCameraInfo(for asset: PHAsset, allowNetwork: Bool) -> CameraInfo? {
+    guard let resource = imageResource(for: asset) else { return nil }
+
+    let options = PHAssetResourceRequestOptions()
+    options.isNetworkAccessAllowed = allowNetwork
+
+    let manager = PHAssetResourceManager.default()
+    let imageSource = CGImageSourceCreateIncremental(nil)
+    let maxBytes = 4 * 1024 * 1024
+
+    let lock = NSLock()
+    var buffer = Data()
+    var info: CameraInfo? = nil
+    var finished = false
+    var requestID: PHAssetResourceDataRequestID = 0
+    var pendingCancel = false
+    let sem = DispatchSemaphore(value: 0)
+
+    // Must be called with `lock` held.
+    func stop(with parsed: CameraInfo?) {
+        if finished { return }
+        finished = true
+        info = parsed
+        if requestID != 0 {
+            manager.cancelDataRequest(requestID)
+        } else {
+            pendingCancel = true
+        }
+        sem.signal()
+    }
+
+    let id = manager.requestData(for: resource, options: options, dataReceivedHandler: { chunk in
+        lock.lock()
+        defer { lock.unlock() }
+        if finished { return }
+        buffer.append(chunk)
+        CGImageSourceUpdateData(imageSource, buffer as CFData, false)
+        if let props = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any] {
+            let parsed = parseCameraInfo(props)
+            if parsed.hasCamera {
+                stop(with: parsed)
+                return
+            }
+        }
+        if buffer.count >= maxBytes {
+            CGImageSourceUpdateData(imageSource, buffer as CFData, true)
+            let props = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any]
+            stop(with: props.map(parseCameraInfo))
+        }
+    }, completionHandler: { _ in
+        lock.lock()
+        defer { lock.unlock() }
+        if finished { return }
+        finished = true
+        CGImageSourceUpdateData(imageSource, buffer as CFData, true)
+        if let props = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any] {
+            info = parseCameraInfo(props)
+        }
+        sem.signal()
+    })
+
+    lock.lock()
+    requestID = id
+    let cancelNow = pendingCancel
+    lock.unlock()
+    if cancelNow { manager.cancelDataRequest(id) }
+
     sem.wait()
-    return result
+    return info
 }
 
 func originalFilename(for asset: PHAsset) -> String? {
