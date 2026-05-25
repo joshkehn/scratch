@@ -373,7 +373,7 @@ func originalFilename(for asset: PHAsset) -> String? {
 
 // MARK: - Commands
 
-func runAnalyze(db: DB, full: Bool, allowNetwork: Bool) {
+func runAnalyze(db: DB, full: Bool, allowNetwork: Bool, concurrency: Int) {
     guard authorize() else {
         stderrLine("Photos access was not granted.")
         stderrLine("Grant access in System Settings > Privacy & Security > Photos, then re-run.")
@@ -400,12 +400,27 @@ func runAnalyze(db: DB, full: Bool, allowNetwork: Bool) {
     let assets = PHAsset.fetchAssets(with: .image, options: fetchOptions)
     let total = assets.count
 
+    var toProcess = [PHAsset]()
+    toProcess.reserveCapacity(total)
+    assets.enumerateObjects { asset, _, _ in
+        if !existing.contains(asset.localIdentifier) {
+            toProcess.append(asset)
+        }
+    }
+    let pending = toProcess.count
+
     print("Found \(total) photos in library.")
     if !existing.isEmpty {
-        print("Resuming: \(existing.count) already analyzed (use --full to rescan everything).")
+        print("Resuming: \(existing.count) already analyzed, \(pending) new (use --full to rescan everything).")
     }
     if !allowNetwork {
         print("Reading only locally-available data (pass --download to fetch iCloud originals).")
+    }
+    print("Extracting metadata with \(concurrency) workers in parallel.")
+
+    if pending == 0 {
+        print("Nothing new to analyze. Run './phototrail list-cameras' to see cameras.")
+        return
     }
 
     let insertPhoto = db.prepare(
@@ -414,92 +429,98 @@ func runAnalyze(db: DB, full: Bool, allowNetwork: Bool) {
         "INSERT OR REPLACE INTO cameras (id, make, model, lens, serial) VALUES (?, ?, ?, ?, ?);")
 
     let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+    // Metadata extraction (network / IO bound) runs in parallel on workQueue,
+    // throttled by `limiter`. All SQLite access and shared counters happen only
+    // on the serial dbQueue, so no locking is needed around them.
+    let dbQueue = DispatchQueue(label: "phototrail.db")
+    let workQueue = DispatchQueue(label: "phototrail.work", attributes: .concurrent)
+    let limiter = DispatchSemaphore(value: max(1, concurrency))
+    let group = DispatchGroup()
+
     var processed = 0
-    var newlyAdded = 0
     var gpsCount = 0
     var unknownCamera = 0
     var camerasSeen = Set<String>()
 
-    db.exec("BEGIN TRANSACTION;")
+    dbQueue.sync { db.exec("BEGIN TRANSACTION;") }
 
-    assets.enumerateObjects { asset, _, _ in
-        processed += 1
-
-        if existing.contains(asset.localIdentifier) {
-            if processed % 25 == 0 || processed == total {
-                let frame = spinner[processed % spinner.count]
-                let pct = total > 0 ? Double(processed) / Double(total) * 100 : 0
-                progress("\(frame) \(processed)/\(total) (\(String(format: "%.1f", pct))%) — skipping known")
+    for asset in toProcess {
+        limiter.wait()
+        group.enter()
+        workQueue.async {
+            defer {
+                limiter.signal()
+                group.leave()
             }
-            return
-        }
 
-        let date = asset.creationDate?.timeIntervalSince1970
-        var lat: Double? = nil
-        var lon: Double? = nil
-        if let loc = asset.location {
-            lat = loc.coordinate.latitude
-            lon = loc.coordinate.longitude
-            gpsCount += 1
-        }
+            let id = asset.localIdentifier
+            let date = asset.creationDate?.timeIntervalSince1970
+            let coord = asset.location?.coordinate
+            let lat = coord?.latitude
+            let lon = coord?.longitude
+            let info = extractCameraInfo(for: asset, allowNetwork: allowNetwork)
+            let filename = originalFilename(for: asset)
+            let hasCamera = info?.hasCamera ?? false
+            let camID = hasCamera
+                ? cameraKey(make: info?.make, model: info?.model, serial: info?.serial)
+                : "Unknown|Unknown"
 
-        let info = extractCameraInfo(for: asset, allowNetwork: allowNetwork)
-        var camID: String
-        if let info = info, info.hasCamera {
-            camID = cameraKey(make: info.make, model: info.model, serial: info.serial)
-            sqlite3_reset(insertCamera)
-            bindText(insertCamera, 1, camID)
-            bindText(insertCamera, 2, info.make ?? "Unknown")
-            bindText(insertCamera, 3, info.model ?? "Unknown")
-            bindText(insertCamera, 4, info.lens)
-            bindText(insertCamera, 5, info.serial)
-            sqlite3_step(insertCamera)
-        } else {
-            camID = "Unknown|Unknown"
-            unknownCamera += 1
-            sqlite3_reset(insertCamera)
-            bindText(insertCamera, 1, camID)
-            bindText(insertCamera, 2, "Unknown")
-            bindText(insertCamera, 3, "Unknown")
-            bindText(insertCamera, 4, nil)
-            bindText(insertCamera, 5, nil)
-            sqlite3_step(insertCamera)
-        }
-        camerasSeen.insert(camID)
+            dbQueue.async {
+                sqlite3_reset(insertCamera)
+                bindText(insertCamera, 1, camID)
+                bindText(insertCamera, 2, hasCamera ? (info?.make ?? "Unknown") : "Unknown")
+                bindText(insertCamera, 3, hasCamera ? (info?.model ?? "Unknown") : "Unknown")
+                bindText(insertCamera, 4, hasCamera ? info?.lens : nil)
+                bindText(insertCamera, 5, hasCamera ? info?.serial : nil)
+                sqlite3_step(insertCamera)
 
-        sqlite3_reset(insertPhoto)
-        bindText(insertPhoto, 1, asset.localIdentifier)
-        bindDouble(insertPhoto, 2, date)
-        bindDouble(insertPhoto, 3, lat)
-        bindDouble(insertPhoto, 4, lon)
-        bindText(insertPhoto, 5, camID)
-        bindText(insertPhoto, 6, originalFilename(for: asset))
-        sqlite3_step(insertPhoto)
+                sqlite3_reset(insertPhoto)
+                bindText(insertPhoto, 1, id)
+                bindDouble(insertPhoto, 2, date)
+                bindDouble(insertPhoto, 3, lat)
+                bindDouble(insertPhoto, 4, lon)
+                bindText(insertPhoto, 5, camID)
+                bindText(insertPhoto, 6, filename)
+                sqlite3_step(insertPhoto)
 
-        newlyAdded += 1
+                processed += 1
+                if lat != nil { gpsCount += 1 }
+                if !hasCamera { unknownCamera += 1 }
+                camerasSeen.insert(camID)
 
-        if newlyAdded % 500 == 0 {
-            db.exec("COMMIT TRANSACTION;")
-            db.exec("BEGIN TRANSACTION;")
-        }
-
-        if processed % 5 == 0 || processed == total {
-            let frame = spinner[processed % spinner.count]
-            let pct = total > 0 ? Double(processed) / Double(total) * 100 : 0
-            progress("\(frame) \(processed)/\(total) (\(String(format: "%.1f", pct))%) — "
-                + "\(camerasSeen.count) cameras, \(gpsCount) with GPS")
+                if processed % 500 == 0 {
+                    db.exec("COMMIT TRANSACTION;")
+                    db.exec("BEGIN TRANSACTION;")
+                }
+                if processed % 5 == 0 || processed == pending {
+                    let frame = spinner[processed % spinner.count]
+                    let pct = pending > 0 ? Double(processed) / Double(pending) * 100 : 0
+                    progress("\(frame) \(processed)/\(pending) (\(String(format: "%.1f", pct))%) — "
+                        + "\(camerasSeen.count) cameras, \(gpsCount) with GPS")
+                }
+            }
         }
     }
 
-    db.exec("COMMIT TRANSACTION;")
-    sqlite3_finalize(insertPhoto)
-    sqlite3_finalize(insertCamera)
+    group.wait()
+    var finalProcessed = 0
+    var finalGPS = 0
+    var finalUnknown = 0
+    dbQueue.sync {
+        db.exec("COMMIT TRANSACTION;")
+        sqlite3_finalize(insertPhoto)
+        sqlite3_finalize(insertCamera)
+        finalProcessed = processed
+        finalGPS = gpsCount
+        finalUnknown = unknownCamera
+    }
     endProgress()
 
-    print("Done. Added \(newlyAdded) new photos this run.")
-    print("  \(gpsCount) of the new photos have GPS coordinates.")
-    if unknownCamera > 0 {
-        print("  \(unknownCamera) had no readable camera metadata (grouped under 'Unknown').")
+    print("Done. Added \(finalProcessed) new photos this run.")
+    print("  \(finalGPS) of the new photos have GPS coordinates.")
+    if finalUnknown > 0 {
+        print("  \(finalUnknown) had no readable camera metadata (grouped under 'Unknown').")
         if !allowNetwork {
             print("  Some of these may be iCloud-only — re-run with --download to read them.")
         }
@@ -717,10 +738,11 @@ func printUsage() {
     phototrail — build a timestamp+GPS trail from your Apple Photos library.
 
     Usage:
-      ./phototrail analyze [--full] [--download]
+      ./phototrail analyze [--full] [--download] [--concurrency N]
           Scan the photo library into phototrail.db.
-          --full      Rescan everything (default resumes, skipping known photos).
-          --download  Allow fetching iCloud originals to read camera metadata.
+          --full           Rescan everything (default resumes, skipping known photos).
+          --download       Allow fetching iCloud data to read camera metadata.
+          --concurrency N  Number of photos to read in parallel (default 8).
 
       ./phototrail list-cameras
           List cameras with photo counts, GPS counts and date ranges.
@@ -742,6 +764,13 @@ guard let command = arguments.first else {
     exit(1)
 }
 
+func intOption(_ args: [String], _ name: String, default def: Int) -> Int {
+    if let i = args.firstIndex(of: name), i + 1 < args.count, let v = Int(args[i + 1]), v > 0 {
+        return v
+    }
+    return def
+}
+
 let dbPath = FileManager.default.currentDirectoryPath + "/phototrail.db"
 let db = DB(path: dbPath)
 setupSchema(db)
@@ -750,7 +779,8 @@ switch command {
 case "analyze":
     let full = arguments.contains("--full")
     let allowNetwork = arguments.contains("--download") || arguments.contains("--allow-network")
-    runAnalyze(db: db, full: full, allowNetwork: allowNetwork)
+    let concurrency = intOption(arguments, "--concurrency", default: 8)
+    runAnalyze(db: db, full: full, allowNetwork: allowNetwork, concurrency: concurrency)
 
 case "list-cameras":
     runListCameras(db: db)
