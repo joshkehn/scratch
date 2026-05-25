@@ -1,2 +1,6 @@
 .env
 .DS_Store
+phototrail.db
+phototrail.db-wal
+phototrail.db-shm
+phototrail
