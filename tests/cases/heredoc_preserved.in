@@ -1,0 +1,7 @@
+#!/bin/bash
+cat <<EOF
+if [ x ]
+then
+this line ends with semicolon;
+EOF
+echo done;

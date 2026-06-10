@@ -1,0 +1,14 @@
+#!/bin/bash
+if [ -n "$a" -a -n "$b" ]; then
+    echo both
+fi
+if [ "$x" -o "$y" ]; then
+    echo either
+fi
+if [ "$name" = *.txt ]; then
+    echo glob
+fi
+if [ "$a" \< "$b" ]; then
+    echo less
+fi
+echo [ not a test ]

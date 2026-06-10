@@ -1,0 +1,9 @@
+#!/bin/bash
+if [ -n "$x" ]; then
+    echo a
+fi
+while [ "$a" = "$b" ]; do
+    echo loop
+done
+[ -f /etc/hosts ] && echo present
+foo || [ -z "$y" ]

@@ -1,0 +1,711 @@
+#!/usr/bin/env bash
+#
+# theshfmt - a shell script formatter and linter, written in portable Bash.
+#
+# Compatibility: the SCRIPT itself is written to run on Bash 3.2 (it avoids
+# bash 4+ features such as associative arrays, ${var^^}/${var,,}, mapfile,
+# nameref, etc). It can FORMAT/LINT shell scripts written for any version of
+# sh/bash/zsh, since it treats the input purely as text.
+#
+# Usage:
+#   theshfmt [-a|--apply-changes] [-p|--print-diff] [-h|--help] <inputs...>
+#
+#   -a, --apply-changes   Apply formatting/lint fixes to the input files.
+#   -p, --print-diff      Only print git-style diffs (do not modify files).
+#   (neither)             Interactive: prompt for each change, y/N (default N).
+#
+# Design notes:
+#   Readability and maintainability are second only to correctness. The tool
+#   must never apply an invalid transformation, so every rule is deliberately
+#   conservative: when in doubt, it leaves the code untouched.
+#
+# Rules implemented (for starters):
+#   fmt:  `if`/`elif` conditions are joined with their `then` onto one line,
+#         producing the `if <cond>; then` form.
+#   fmt:  a line must not end with a redundant trailing `;` (a `;` that
+#         separates two statements mid-line is preserved).
+#   lint: a `[ ... ]` test is upgraded to `[[ ... ]]` when it is provably safe
+#         to do so.
+
+# extglob is used for whitespace trimming patterns; available since bash 3.x.
+shopt -s extglob 2>/dev/null
+
+PROG="theshfmt"
+
+# ---------------------------------------------------------------------------
+# Colors (only when writing to a terminal).
+# ---------------------------------------------------------------------------
+if [ -t 1 ] && [ "${NO_COLOR:-}" != "1" ]; then
+    C_RED=$'\033[31m'; C_GRN=$'\033[32m'; C_CYN=$'\033[36m'
+    C_BLD=$'\033[1m'; C_RST=$'\033[0m'
+else
+    C_RED=; C_GRN=; C_CYN=; C_BLD=; C_RST=
+fi
+
+usage() {
+    cat <<EOF
+${PROG} - shell script formatter and linter
+
+Usage:
+  ${PROG} [-a|--apply-changes] [-p|--print-diff] [-h|--help] <inputs...>
+
+Options:
+  -a, --apply-changes   Apply formatting/lint fixes to the input files.
+  -p, --print-diff      Only print git-style diffs (files are not modified).
+  -h, --help            Show this help.
+
+With no -a/-p flag, runs interactively and prompts y/N for each change
+(the default answer is N).
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
+
+# trim: strip leading and trailing whitespace. Result on stdout.
+trim() {
+    local x="$1"
+    x="${x##+([[:space:]])}"
+    x="${x%%+([[:space:]])}"
+    printf '%s' "$x"
+}
+
+# rstrip: strip trailing whitespace only. Result on stdout.
+rstrip() {
+    printf '%s' "${1%%+([[:space:]])}"
+}
+
+# ---------------------------------------------------------------------------
+# classify_line: lexically scan a single line, honoring quotes, comments,
+# arithmetic context and heredoc operators.
+#
+# Args: $1 = line text, $2 = quote state entering the line ("", "'" or '"').
+#
+# Sets globals:
+#   CL_OPENQUOTE      quote char still open at end of line (for continuation)
+#   CL_COMMENT        index where an unquoted `#` comment begins, else -1
+#   CL_CODEEND        index of end of "code" portion (= comment start or len)
+#   CL_LASTCODE       index of last non-whitespace code char, else -1
+#   CL_LASTSEMI       index of last unquoted, unescaped `;` separator, else -1
+#   CL_SEMI_DOUBLED   1 if the trailing `;` is part of `;;`, else 0
+#   CL_HEREDOC_DELIM  delimiter word if this line opens a heredoc, else ""
+#   CL_HEREDOC_DASH   1 if it was a `<<-` heredoc, else 0
+# ---------------------------------------------------------------------------
+classify_line() {
+    local s="$1" q="$2"
+    local n=${#s} i=0 c prev depth=0 lastcode=-1
+    CL_COMMENT=-1; CL_LASTSEMI=-1; CL_SEMI_DOUBLED=0
+    CL_HEREDOC_DELIM=""; CL_HEREDOC_DASH=0
+
+    while [ $i -lt $n ]; do
+        c=${s:i:1}
+
+        if [ "$q" = "'" ]; then
+            if [ "$c" = "'" ]; then q=""; fi
+            lastcode=$i; i=$((i+1)); continue
+        elif [ "$q" = '"' ]; then
+            if [ "$c" = '\' ]; then lastcode=$((i+1)); i=$((i+2)); continue; fi
+            if [ "$c" = '"' ]; then q=""; fi
+            lastcode=$i; i=$((i+1)); continue
+        fi
+
+        # Unquoted context.
+        case "$c" in
+            '\')
+                lastcode=$((i+1)); i=$((i+2)); continue ;;
+            "'")
+                q="'"; lastcode=$i; i=$((i+1)); continue ;;
+            '"')
+                q='"'; lastcode=$i; i=$((i+1)); continue ;;
+        esac
+
+        # Arithmetic nesting: (( ... )) and $(( ... )). Inside it, `<<`, `;`
+        # and `#` are operators/values, not shell metacharacters.
+        if [ "$c" = '(' ] && [ "${s:i+1:1}" = '(' ]; then
+            depth=$((depth+1)); lastcode=$((i+1)); i=$((i+2)); continue
+        fi
+        if [ "$c" = ')' ] && [ "${s:i+1:1}" = ')' ] && [ $depth -gt 0 ]; then
+            depth=$((depth-1)); lastcode=$((i+1)); i=$((i+2)); continue
+        fi
+
+        if [ $depth -eq 0 ]; then
+            if [ "$c" = '#' ]; then
+                if [ $i -eq 0 ]; then CL_COMMENT=$i; break; fi
+                prev=${s:i-1:1}
+                case "$prev" in
+                    ' '|$'\t'|';'|'&'|'|'|'('|')'|'<'|'>'|'`')
+                        CL_COMMENT=$i; break ;;
+                    *) lastcode=$i; i=$((i+1)); continue ;;
+                esac
+            fi
+
+            if [ "$c" = ';' ]; then
+                if [ "${s:i+1:1}" = ';' ] || { [ $i -gt 0 ] && [ "${s:i-1:1}" = ';' ]; }; then
+                    CL_SEMI_DOUBLED=1
+                fi
+                CL_LASTSEMI=$i; lastcode=$i; i=$((i+1)); continue
+            fi
+
+            if [ "$c" = '<' ] && [ "${s:i+1:1}" = '<' ]; then
+                # `<<<` is a here-string, not a here-document.
+                if [ "${s:i+2:1}" = '<' ]; then
+                    lastcode=$((i+2)); i=$((i+3)); continue
+                fi
+                local j=$((i+2)) dash=0
+                if [ "${s:j:1}" = '-' ]; then dash=1; j=$((j+1)); fi
+                while [ "${s:j:1}" = ' ' ] || [ "${s:j:1}" = $'\t' ]; do
+                    j=$((j+1))
+                done
+                local delim="" dc
+                while [ $j -lt $n ]; do
+                    dc=${s:j:1}
+                    case "$dc" in
+                        [A-Za-z0-9_.-]) delim="$delim$dc"; j=$((j+1)) ;;
+                        '"'|"'"|'\') j=$((j+1)) ;;
+                        *) break ;;
+                    esac
+                done
+                if [ -n "$delim" ]; then
+                    CL_HEREDOC_DELIM="$delim"; CL_HEREDOC_DASH=$dash
+                fi
+                lastcode=$((j-1)); i=$j; continue
+            fi
+        fi
+
+        case "$c" in
+            ' '|$'\t') ;;
+            *) lastcode=$i ;;
+        esac
+        i=$((i+1))
+    done
+
+    CL_OPENQUOTE="$q"
+    if [ $CL_COMMENT -ge 0 ]; then CL_CODEEND=$CL_COMMENT; else CL_CODEEND=$n; fi
+    CL_LASTCODE=$lastcode
+}
+
+# ---------------------------------------------------------------------------
+# tokenize_code: split a code string into shell words, honoring quotes and
+# backslash escapes. Unquoted metacharacters (; & | ( ) < >) break words and
+# are emitted as their own operator tokens, so e.g. `];` yields `]` then `;`.
+# Records each token's value and char offsets.
+#
+# Sets globals (parallel arrays): TOKV, TOKS (start), TOKE (end, exclusive).
+# ---------------------------------------------------------------------------
+tokenize_code() {
+    local s="$1" n=${#s} i=0 c
+    TOKV=(); TOKS=(); TOKE=()
+    while [ $i -lt $n ]; do
+        c=${s:i:1}
+        case "$c" in
+            ' '|$'\t') i=$((i+1)); continue ;;
+        esac
+
+        # Operator tokens.
+        case "$c" in
+            ';'|'&'|'|'|'('|')'|'<'|'>')
+                local op="$c" olen=1 nx="${s:i+1:1}"
+                case "$c$nx" in
+                    ';;'|'&&'|'||'|'<<'|'>>'|'<&'|'>&'|'<>'|';&') op="$c$nx"; olen=2 ;;
+                esac
+                TOKV[${#TOKV[@]}]="$op"
+                TOKS[${#TOKS[@]}]="$i"
+                TOKE[${#TOKE[@]}]="$((i+olen))"
+                i=$((i+olen)); continue ;;
+        esac
+
+        local start=$i q=""
+        while [ $i -lt $n ]; do
+            c=${s:i:1}
+            if [ "$q" = "'" ]; then
+                if [ "$c" = "'" ]; then q=""; fi
+                i=$((i+1)); continue
+            elif [ "$q" = '"' ]; then
+                if [ "$c" = '\' ]; then i=$((i+2)); continue; fi
+                if [ "$c" = '"' ]; then q=""; fi
+                i=$((i+1)); continue
+            fi
+            case "$c" in
+                ' '|$'\t'|';'|'&'|'|'|'('|')'|'<'|'>') break ;;
+                '\') i=$((i+2)); continue ;;
+                "'") q="'"; i=$((i+1)); continue ;;
+                '"') q='"'; i=$((i+1)); continue ;;
+                *) i=$((i+1)) ;;
+            esac
+        done
+        TOKV[${#TOKV[@]}]="${s:start:i-start}"
+        TOKS[${#TOKS[@]}]="$start"
+        TOKE[${#TOKE[@]}]="$i"
+    done
+}
+
+# ---------------------------------------------------------------------------
+# expr_is_safe: decide whether the test expression in TOKV[lo..hi] (the tokens
+# between `[` and `]`) can be converted to `[[ ... ]]` without changing
+# behavior. Returns 0 (safe) or 1 (unsafe / leave alone).
+#
+# Conservative: rejects constructs whose meaning differs between `[` and `[[`.
+# ---------------------------------------------------------------------------
+expr_is_safe() {
+    local lo=$1 hi=$2 j tk rhs
+    [ $hi -lt $lo ] && return 1   # empty test: `[[ ]]` is a syntax error.
+    for ((j=lo; j<=hi; j++)); do
+        tk="${TOKV[$j]}"
+        case "$tk" in
+            # `-a`/`-o` are binary and/or in `[`, but unary file tests in `[[`.
+            '-a'|'-o') return 1 ;;
+            # Bare `<`/`>` are redirections in `[`; comparisons in `[[`.
+            '<'|'>') return 1 ;;
+            # Escaped operators behave differently between the two forms.
+            '\<'|'\>'|'\('|'\)'|'\|') return 1 ;;
+        esac
+        case "$tk" in
+            *'\<'*|*'\>'*|*'\('*|*'\)'*) return 1 ;;
+        esac
+        # `=`/`==`/`!=`: an unquoted RHS with glob metacharacters becomes a
+        # pattern under `[[`, which differs from literal comparison under `[`.
+        case "$tk" in
+            '='|'=='|'!=')
+                if [ $((j+1)) -le $hi ]; then
+                    rhs="${TOKV[$((j+1))]}"
+                    case "$rhs" in
+                        \'*|\"*) : ;;                       # quoted -> literal
+                        *'*'*|*'?'*|*'['*) return 1 ;;      # unquoted glob
+                    esac
+                fi
+                ;;
+        esac
+    done
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# apply_L1: lint rule - convert safe `[ ... ]` tests to `[[ ... ]]`.
+# Operates on a full line; preserves all interior spacing byte-for-byte.
+# Sets L1_RESULT and L1_FIRED.
+# ---------------------------------------------------------------------------
+apply_L1() {
+    local s="$1"
+    L1_RESULT="$s"; L1_FIRED=0
+
+    classify_line "$s" ""
+    [ -n "$CL_OPENQUOTE" ] && return
+    local code="${s:0:CL_CODEEND}"
+    tokenize_code "$code"
+    local ntok=${#TOKV[@]}
+    [ $ntok -eq 0 ] && return
+
+    local pairs_l=() pairs_r=() k=0
+    while [ $k -lt $ntok ]; do
+        if [ "${TOKV[$k]}" = "[" ]; then
+            local okpos=0
+            if [ $k -eq 0 ]; then
+                okpos=1
+            else
+                case "${TOKV[$((k-1))]}" in
+                    if|elif|while|until|'!'|'&&'|'||'|'|'|'('|'{'|';'|then|do|else)
+                        okpos=1 ;;
+                esac
+            fi
+            if [ $okpos -eq 1 ]; then
+                local m=$((k+1)) found=-1
+                while [ $m -lt $ntok ]; do
+                    if [ "${TOKV[$m]}" = "]" ]; then found=$m; break; fi
+                    m=$((m+1))
+                done
+                if [ $found -gt $k ]; then
+                    if expr_is_safe $((k+1)) $((found-1)); then
+                        pairs_l[${#pairs_l[@]}]="$k"
+                        pairs_r[${#pairs_r[@]}]="$found"
+                        k=$((found+1)); continue
+                    fi
+                fi
+            fi
+        fi
+        k=$((k+1))
+    done
+
+    local np=${#pairs_l[@]}
+    [ $np -eq 0 ] && return
+
+    # Splice right-to-left so earlier offsets remain valid.
+    local result="$s" idx=$((np-1)) li ri ls le rs re
+    while [ $idx -ge 0 ]; do
+        li=${pairs_l[$idx]}; ri=${pairs_r[$idx]}
+        ls=${TOKS[$li]}; le=${TOKE[$li]}
+        rs=${TOKS[$ri]}; re=${TOKE[$ri]}
+        result="${result:0:rs}]]${result:re}"
+        result="${result:0:ls}[[${result:le}"
+        idx=$((idx-1))
+    done
+    L1_RESULT="$result"; L1_FIRED=1
+}
+
+# ---------------------------------------------------------------------------
+# apply_F2: format rule - strip a redundant trailing `;` from a line.
+# A `;` that separates two statements mid-line is left untouched.
+# Sets F2_RESULT and F2_FIRED.
+# ---------------------------------------------------------------------------
+apply_F2() {
+    local s="$1"
+    F2_RESULT="$s"; F2_FIRED=0
+
+    classify_line "$s" ""
+    [ -n "$CL_OPENQUOTE" ] && return
+    [ $CL_COMMENT -ge 0 ] && return
+    local L=$CL_LASTCODE
+    [ $L -lt 0 ] && return
+    [ "${s:L:1}" = ';' ] || return
+    [ $CL_LASTSEMI -eq $L ] || return
+    [ $CL_SEMI_DOUBLED -eq 0 ] || return
+
+    local before="${s:0:L}"
+    before=$(rstrip "$before")
+    [ -z "$before" ] && return   # line was just `;`
+
+    F2_RESULT="$before"; F2_FIRED=1
+}
+
+# ---------------------------------------------------------------------------
+# read_file_lines: load a file into the LINES array. Sets HAD_NL (1 if the
+# file ends with a newline). Preserves blank lines and a missing final newline.
+# ---------------------------------------------------------------------------
+read_file_lines() {
+    local f="$1" line
+    LINES=()
+    while IFS= read -r line || [ -n "$line" ]; do
+        LINES[${#LINES[@]}]="$line"
+    done < "$f"
+    if [ -s "$f" ]; then
+        local last
+        last=$(tail -c1 "$f"; printf x); last=${last%x}
+        if [ "$last" = $'\n' ]; then HAD_NL=1; else HAD_NL=0; fi
+    else
+        HAD_NL=1
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# analyze: run all rules over LINES, producing the parallel arrays
+#   OUT[i]    transformed text for line i
+#   DROP[i]   1 if line i is absorbed into the previous line (deleted)
+#   ACTIVE[i] 1 if line i was eligible for transformation
+#   RULE[i]   human-readable description of rules that fired on line i
+# ---------------------------------------------------------------------------
+analyze() {
+    local n=${#LINES[@]} i line
+    OUT=(); DROP=(); ACTIVE=(); RULE=()
+
+    local st_quote="" st_heredoc="" st_heredoc_dash=0
+
+    for ((i=0; i<n; i++)); do
+        line="${LINES[$i]}"
+        OUT[$i]="$line"; DROP[$i]=0; ACTIVE[$i]=0; RULE[$i]=""
+
+        if [ -n "$st_heredoc" ]; then
+            local cmp="$line"
+            if [ $st_heredoc_dash -eq 1 ]; then
+                cmp="${line##+($'\t')}"
+            fi
+            if [ "$cmp" = "$st_heredoc" ]; then st_heredoc=""; fi
+            continue
+        fi
+
+        if [ -n "$st_quote" ]; then
+            classify_line "$line" "$st_quote"
+            st_quote="$CL_OPENQUOTE"
+            continue
+        fi
+
+        ACTIVE[$i]=1
+
+        # Capture state transitions from the original line first.
+        classify_line "$line" ""
+        local nextq="$CL_OPENQUOTE"
+        local hd="$CL_HEREDOC_DELIM" hdash="$CL_HEREDOC_DASH"
+
+        # Lint then format, in pipeline order.
+        apply_L1 "$line"
+        local t="$L1_RESULT"
+        if [ $L1_FIRED -eq 1 ]; then RULE[$i]="lint: [ ] -> [[ ]]"; fi
+
+        apply_F2 "$t"
+        t="$F2_RESULT"
+        if [ $F2_FIRED -eq 1 ]; then
+            if [ -n "${RULE[$i]}" ]; then
+                RULE[$i]="${RULE[$i]}, fmt: drop trailing ;"
+            else
+                RULE[$i]="fmt: drop trailing ;"
+            fi
+        fi
+
+        OUT[$i]="$t"
+
+        if [ -n "$hd" ]; then st_heredoc="$hd"; st_heredoc_dash="$hdash"; fi
+        st_quote="$nextq"
+    done
+
+    # F1: join `if`/`elif` conditions with a following lone `then`.
+    for ((i=1; i<n; i++)); do
+        [ "${ACTIVE[$i]}" = "1" ] || continue
+        [ "$(trim "${OUT[$i]}")" = "then" ] || continue
+        local p=$((i-1))
+        [ "${ACTIVE[$p]}" = "1" ] || continue
+        [ "${DROP[$p]}" = "0" ] || continue
+
+        local prev="${OUT[$p]}"
+        classify_line "$prev" ""
+        [ $CL_COMMENT -ge 0 ] && continue
+        [ -n "$CL_OPENQUOTE" ] && continue
+
+        local pc
+        pc=$(trim "$prev")
+        [ -n "$pc" ] || continue
+        case "$pc" in
+            if|elif) continue ;;
+            *'&&'|*'||'|*'|'|*'&'|*'{'|*'(') continue ;;
+            *\\) continue ;;
+            *';'|*';;') continue ;;
+            then|do|else|*' then'|*' do') continue ;;
+        esac
+
+        OUT[$p]="$(rstrip "$prev"); then"
+        DROP[$i]=1
+        if [ -n "${RULE[$p]}" ]; then
+            RULE[$p]="${RULE[$p]}, fmt: ; then"
+        else
+            RULE[$p]="fmt: ; then"
+        fi
+    done
+}
+
+# ---------------------------------------------------------------------------
+# build_regions: group the changes into reviewable regions. A region is one
+# changed source line plus any following lines it absorbed (via F1).
+#
+# Sets parallel arrays REGA (start), REGB (end), REGDESC (description).
+# ---------------------------------------------------------------------------
+build_regions() {
+    local n=${#LINES[@]} i=0
+    REGA=(); REGB=(); REGDESC=()
+    while [ $i -lt $n ]; do
+        if [ "${ACTIVE[$i]}" = "1" ] && [ "${OUT[$i]}" != "${LINES[$i]}" ]; then
+            local a=$i b=$i
+            while [ $((b+1)) -lt $n ] && [ "${DROP[$((b+1))]}" = "1" ]; do
+                b=$((b+1))
+            done
+            REGA[${#REGA[@]}]="$a"
+            REGB[${#REGB[@]}]="$b"
+            REGDESC[${#REGDESC[@]}]="${RULE[$a]}"
+            i=$((b+1)); continue
+        fi
+        i=$((i+1))
+    done
+}
+
+# ---------------------------------------------------------------------------
+# build_output: assemble the resulting file text into OUTSTR.
+#   $1 = "all"    -> apply every region
+#        "select" -> apply only regions where ACCEPT[r] == 1
+# ---------------------------------------------------------------------------
+build_output() {
+    local mode="$1" n=${#LINES[@]} i=0 r=0 nr=${#REGA[@]}
+    OUTSTR=""
+    while [ $i -lt $n ]; do
+        if [ $r -lt $nr ] && [ "${REGA[$r]}" = "$i" ]; then
+            local a=${REGA[$r]} b=${REGB[$r]} accept=1 k
+            if [ "$mode" = "select" ]; then accept=${ACCEPT[$r]}; fi
+            if [ "$accept" = "1" ]; then
+                for ((k=a; k<=b; k++)); do
+                    [ "${DROP[$k]}" = "1" ] && continue
+                    OUTSTR="$OUTSTR${OUT[$k]}"$'\n'
+                done
+            else
+                for ((k=a; k<=b; k++)); do
+                    OUTSTR="$OUTSTR${LINES[$k]}"$'\n'
+                done
+            fi
+            i=$((b+1)); r=$((r+1)); continue
+        fi
+        OUTSTR="$OUTSTR${LINES[$i]}"$'\n'
+        i=$((i+1))
+    done
+    if [ $HAD_NL -eq 0 ] && [ -n "$OUTSTR" ]; then
+        OUTSTR="${OUTSTR%$'\n'}"
+    fi
+}
+
+# colorize_diff: read a unified diff on stdin and color +/-/@@ lines.
+colorize_diff() {
+    local l
+    while IFS= read -r l; do
+        case "$l" in
+            '@@'*) printf '%s%s%s\n' "$C_CYN" "$l" "$C_RST" ;;
+            '+'*)  printf '%s%s%s\n' "$C_GRN" "$l" "$C_RST" ;;
+            '-'*)  printf '%s%s%s\n' "$C_RED" "$l" "$C_RST" ;;
+            *)     printf '%s\n' "$l" ;;
+        esac
+    done
+}
+
+# print_git_diff: emit a git-style unified diff between $1 (original path) and
+# $2 (formatted temp file).
+print_git_diff() {
+    local path="$1" tmp="$2" body
+    body=$(diff -u "$path" "$tmp")
+    [ -z "$body" ] && return 0
+    {
+        printf '%s%s%s\n' "$C_BLD" "diff --git a/$path b/$path" "$C_RST"
+        printf '%s%s%s\n' "$C_BLD" "--- a/$path" "$C_RST"
+        printf '%s%s%s\n' "$C_BLD" "+++ b/$path" "$C_RST"
+        # Drop diff's own ---/+++ header lines; keep the hunks.
+        printf '%s\n' "$body" | sed -e '1,2d' | colorize_diff
+    }
+}
+
+# show_region: print a small before/after preview for an interactive prompt.
+show_region() {
+    local r="$1" a=${REGA[$r]} b=${REGB[$r]} k
+    printf '%s%s:%d%s  %s%s%s\n' \
+        "$C_BLD" "$CUR_PATH" $((a+1)) "$C_RST" \
+        "$C_CYN" "${REGDESC[$r]}" "$C_RST"
+    for ((k=a; k<=b; k++)); do
+        printf '%s-%s%s\n' "$C_RED" "${LINES[$k]}" "$C_RST"
+    done
+    for ((k=a; k<=b; k++)); do
+        [ "${DROP[$k]}" = "1" ] && continue
+        printf '%s+%s%s\n' "$C_GRN" "${OUT[$k]}" "$C_RST"
+    done
+}
+
+# write_output: write OUTSTR to a temp file then move it over $1.
+write_output() {
+    local path="$1" tmp
+    tmp=$(mktemp "${path}.theshfmt.XXXXXX") || return 1
+    printf '%s' "$OUTSTR" > "$tmp" || { rm -f "$tmp"; return 1; }
+    mv -f "$tmp" "$path"
+}
+
+# ---------------------------------------------------------------------------
+# process_file: run the requested mode over one file.
+# ---------------------------------------------------------------------------
+process_file() {
+    local path="$1"
+    CUR_PATH="$path"
+
+    if [ ! -f "$path" ]; then
+        printf '%s: %s: no such file\n' "$PROG" "$path" >&2
+        RC=1; return
+    fi
+    if [ ! -r "$path" ]; then
+        printf '%s: %s: not readable\n' "$PROG" "$path" >&2
+        RC=1; return
+    fi
+
+    read_file_lines "$path"
+    analyze
+    build_regions
+    local nr=${#REGA[@]}
+
+    if [ $nr -eq 0 ]; then
+        if [ $MODE_PRINT -eq 0 ] && [ $MODE_APPLY -eq 0 ]; then
+            printf '%s: no changes needed\n' "$path"
+        fi
+        return
+    fi
+
+    ANY_CHANGED=1
+
+    if [ $MODE_PRINT -eq 1 ]; then
+        build_output all
+        local tmp
+        tmp=$(mktemp) || { RC=1; return; }
+        printf '%s' "$OUTSTR" > "$tmp"
+        print_git_diff "$path" "$tmp"
+        rm -f "$tmp"
+        return
+    fi
+
+    if [ $MODE_APPLY -eq 1 ]; then
+        build_output all
+        if write_output "$path"; then
+            printf '%s: applied %d change(s)\n' "$path" "$nr"
+        else
+            printf '%s: %s: failed to write\n' "$PROG" "$path" >&2
+            RC=1
+        fi
+        return
+    fi
+
+    # Interactive mode: prompts and answers go over stdin/stdout. On EOF (no
+    # terminal, closed stdin) every prompt defaults to N, so nothing is applied.
+    if [ ! -t 0 ]; then
+        printf '%s: %s: stdin is not a terminal; answer prompts via stdin or use -a/-p\n' \
+            "$PROG" "$path" >&2
+    fi
+    ACCEPT=()
+    local r ans naccept=0
+    for ((r=0; r<nr; r++)); do
+        show_region "$r"
+        printf 'Apply this change? [y/N] '
+        IFS= read -r ans || ans=""
+        case "$ans" in
+            y|Y|yes|YES) ACCEPT[$r]=1; naccept=$((naccept+1)) ;;
+            *) ACCEPT[$r]=0 ;;
+        esac
+        printf '\n'
+    done
+    if [ $naccept -gt 0 ]; then
+        build_output select
+        if write_output "$path"; then
+            printf '%s: applied %d of %d change(s)\n' "$path" "$naccept" "$nr"
+        else
+            printf '%s: %s: failed to write\n' "$PROG" "$path" >&2
+            RC=1
+        fi
+    else
+        printf '%s: no changes applied\n' "$path"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+MODE_APPLY=0
+MODE_PRINT=0
+FILES=()
+RC=0
+ANY_CHANGED=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -a|--apply-changes) MODE_APPLY=1 ;;
+        -p|--print-diff)    MODE_PRINT=1 ;;
+        -h|--help)          usage; exit 0 ;;
+        --) shift; while [ $# -gt 0 ]; do FILES[${#FILES[@]}]="$1"; shift; done; break ;;
+        -*) printf '%s: unknown option: %s\n' "$PROG" "$1" >&2; usage >&2; exit 2 ;;
+        *)  FILES[${#FILES[@]}]="$1" ;;
+    esac
+    shift
+done
+
+if [ ${#FILES[@]} -eq 0 ]; then
+    printf '%s: no input files\n' "$PROG" >&2
+    usage >&2
+    exit 2
+fi
+if [ $MODE_APPLY -eq 1 ] && [ $MODE_PRINT -eq 1 ]; then
+    printf '%s: -a and -p are mutually exclusive\n' "$PROG" >&2
+    exit 2
+fi
+
+for f in "${FILES[@]}"; do
+    process_file "$f"
+done
+
+# In print-diff (check) mode, a nonzero status signals that changes are needed.
+if [ $MODE_PRINT -eq 1 ] && [ $ANY_CHANGED -eq 1 ] && [ $RC -eq 0 ]; then
+    RC=1
+fi
+exit $RC

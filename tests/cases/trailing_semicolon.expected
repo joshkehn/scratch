@@ -1,0 +1,6 @@
+#!/bin/bash
+echo hello
+echo world
+foo; bar
+ls -l
+echo "keep this ; inside"

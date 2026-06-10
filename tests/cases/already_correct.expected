@@ -1,0 +1,6 @@
+#!/bin/bash
+if [[ -n "$x" ]]; then
+    echo ok
+fi
+foo; bar
+echo done

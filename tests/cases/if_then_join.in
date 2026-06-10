@@ -1,0 +1,13 @@
+#!/bin/bash
+if [[ -n "$x" ]]
+then
+    echo hi
+fi
+
+if [[ $a == 1 ]]
+    then
+    echo one
+elif [[ $a == 2 ]]
+then
+    echo two
+fi

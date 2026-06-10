@@ -1,0 +1,7 @@
+#!/bin/bash
+msg="line one;
+line two;"
+echo "$msg"
+echo hi   # trailing comment, not a ; ending
+x=1 ;  # comment after semicolon
+echo 'literal ; semicolon'

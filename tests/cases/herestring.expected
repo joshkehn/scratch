@@ -1,0 +1,8 @@
+#!/bin/bash
+grep foo <<< "$data"
+echo after
+cat <<-END
+	if [ x ]
+	then keep me;
+	END
+echo end
