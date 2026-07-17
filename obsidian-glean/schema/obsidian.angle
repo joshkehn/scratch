@@ -1,0 +1,249 @@
+# Glean schema for Obsidian vaults.
+#
+# Models the files, notes, YAML frontmatter properties, tags, links, headings
+# and block identifiers of an Obsidian vault as Glean facts, so the graph can
+# be queried -- for example by a language server -- to jump between notes,
+# follow backlinks, and search notes by tag or frontmatter property.
+#
+# References:
+#   - Glean schemas:  https://glean.software/docs/schema/basic
+#   - Obsidian links: https://obsidian.md/help  ("Internal links", "Tags",
+#                     "Properties", "Obsidian Flavored Markdown")
+#
+# The companion indexer (../src) emits facts of these predicates as JSON.
+
+schema obsidian.notes.1 {
+
+# ===========================================================================
+# Files
+# ===========================================================================
+
+# Any file in the vault, identified by its vault-relative path using forward
+# slashes, e.g. "Linking notes and files/Internal links.md". This is the
+# identity that links resolve to, whether or not the file is Markdown.
+predicate File : string
+
+# The file's base name including its extension, e.g. "Internal links.md" or
+# "Figure 1.png". Emitted for every file so that non-Markdown attachments are
+# queryable by name.
+predicate FileName :
+  {
+    file : File,
+    name : string,
+  }
+
+# The file's lower-cased extension without the leading dot, e.g. "md", "png",
+# "pdf". Files with no extension get no FileExtension fact. Lets you query,
+# say, every image referenced by a note.
+predicate FileExtension :
+  {
+    file : File,
+    extension : string,
+  }
+
+# ===========================================================================
+# Notes
+# ===========================================================================
+
+# A Markdown note: a File whose extension is "md". Frontmatter, tags, links,
+# headings and blocks below all attach to a Note, whereas a Reference may
+# target any File (notes as well as attachments such as images).
+predicate Note : File
+
+# The note's title: its base name without the ".md" extension, e.g.
+# "Internal links". This is the name wikilinks resolve against.
+predicate NoteTitle :
+  {
+    note : Note,
+    title : string,
+  }
+
+# ===========================================================================
+# Frontmatter (YAML properties)
+# ===========================================================================
+#
+# Obsidian stores structured note metadata as YAML "properties" in a
+# frontmatter block delimited by `---` at the very top of the file. Each
+# property has a name (key), a type and one or more values. The three
+# predicates below expose that at increasing specificity:
+#
+#   HasKey       -- "has key" / "has key of name": the note has property `key`
+#   HasKeyType   -- "has key of type":             `key` has this type
+#   HasKeyValue  -- "has key of name with value":  `key` has this value
+
+# The Obsidian property type of a frontmatter value, mirroring the property
+# types shown in Obsidian's UI (Text / List / Number / Checkbox / Date /
+# Date & time).
+#
+# NOTE: an `enum` is encoded in Glean's JSON as the 0-based index of the
+# alternative, so this ordering is part of the wire format and must be kept in
+# sync with `PropertyType` in ../src/model.rs.
+type PropertyType =
+  enum { text | list | number | checkbox | date | datetime }
+
+# A single frontmatter property value. Numbers, dates and datetimes are
+# carried in their textual form to avoid loss (Angle has no float type), while
+# checkboxes are booleans. A `list` property emits one PropertyValue per
+# element (each tagged `text` or the appropriate scalar type).
+type PropertyValue =
+  {
+    text : string |
+    number : string |
+    checkbox : bool |
+    date : string |
+    datetime : string
+  }
+
+# "has key" (and "has key of name"): the note has a frontmatter property with
+# this name. `key` is the property name.
+predicate HasKey :
+  {
+    note : Note,
+    key : string,
+  }
+
+# "has key of type": the frontmatter property named `key` has this type.
+# (`type_` has a trailing underscore because `type` is an Angle keyword, per
+# the same convention as `class_` in Glean's own example schemas.)
+predicate HasKeyType :
+  {
+    note : Note,
+    key : string,
+    type_ : PropertyType,
+  }
+
+# "has key of name with value": the frontmatter property named `key` has this
+# value. A multi-valued (list) property produces one fact per element.
+predicate HasKeyValue :
+  {
+    note : Note,
+    key : string,
+    value : PropertyValue,
+  }
+
+# ===========================================================================
+# Tags
+# ===========================================================================
+
+# A tag, stored without the leading '#', e.g. "inbox/to-read". Nested tags
+# keep their slashes. Obsidian tags are case-insensitive; the casing kept here
+# is the casing as written at the occurrence.
+predicate Tag : string
+
+# "notes with tag": the note carries this tag, whether written inline (`#tag`)
+# in the body or listed under the `tags` frontmatter property.
+predicate NoteTag :
+  {
+    note : Note,
+    tag : Tag,
+  }
+
+# ===========================================================================
+# Links / references
+# ===========================================================================
+
+# How a reference was written in the source note.
+#
+#   wikilink -- [[Target]] / [[Target|alias]] / [[Target#Heading]]
+#   embed    -- ![[Target]] (transcluded content)
+#   markdown -- [alias](Target)
+#
+# Encoded as an enum index; keep in sync with `LinkKind` in ../src/model.rs.
+type LinkKind =
+  enum { wikilink | embed | markdown }
+
+# A byte range within the *source note's* file contents: 0-based `start`
+# offset and byte `length`. Locates the link text so an editor / LSP server
+# can turn it into a clickable navigation target.
+type ByteSpan =
+  {
+    start : nat,
+    length : nat,
+  }
+
+# A within-file destination for a link. `none` means the link points at the
+# whole file; `heading` and `block` name an anchor inside the target.
+#
+#   [[Note]]           -> none
+#   [[Note#Heading]]   -> heading "Heading"
+#   [[Note#^block-id]] -> block "block-id"
+#
+# Modelled as an explicit sum (rather than `maybe`) so every Reference carries
+# a well-defined anchor.
+type Anchor =
+  {
+    none : {} |
+    heading : string |
+    block : string
+  }
+
+# "references of a note": an internal link from `source` to another file that
+# was resolved to an actual File in the vault. `span` locates the link in the
+# source note; `anchor` names an optional heading/block within the target.
+# Backlinks are the reverse of this predicate -- see `Backlink` below.
+predicate Reference :
+  {
+    source : Note,
+    target : File,
+    kind : LinkKind,
+    span : ByteSpan,
+    anchor : Anchor,
+  }
+
+# An internal link whose target could not be resolved to a file in the vault
+# (a dangling link). `target` is the raw link destination as written, minus
+# any alias/anchor.
+predicate UnresolvedReference :
+  {
+    source : Note,
+    target : string,
+    kind : LinkKind,
+    span : ByteSpan,
+  }
+
+# ===========================================================================
+# Navigation targets inside a note: headings and block identifiers
+# ===========================================================================
+
+# A Markdown ATX heading in a note (`#` .. `######`). `level` is 1-6 and
+# `span` covers the heading text. Lets a link `[[Note#Heading]]` resolve to a
+# jump location.
+predicate Heading :
+  {
+    note : Note,
+    text : string,
+    level : nat,
+    span : ByteSpan,
+  }
+
+# A block identifier defined in a note: a trailing `^block-id` marker on a
+# line or paragraph. Lets a link `[[Note#^block-id]]` resolve to a jump
+# location.
+predicate Block :
+  {
+    note : Note,
+    id : string,
+    span : ByteSpan,
+  }
+
+# ===========================================================================
+# Derived relationships
+# ===========================================================================
+
+# "back links": for a given target File, the notes that link to it. This is
+# simply the reverse of `Reference`, computed on demand (not stored), so no
+# `glean derive` step is required.
+predicate Backlink :
+  {
+    target : File,
+    source : Note,
+  }
+  { target = T, source = S } where Reference { source = S, target = T }
+
+}
+
+# Expose the predicates under their unversioned names (e.g. `obsidian.notes.Note`)
+# so queries and the shell can use them without a version suffix. When merging
+# this schema into an existing Glean deployment that already defines its own
+# `all` schema, drop this block and add `obsidian.notes.1` to that schema instead.
+schema all.1 : obsidian.notes.1 {}
