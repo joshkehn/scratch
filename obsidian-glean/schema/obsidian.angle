@@ -50,12 +50,35 @@ predicate FileExtension :
 # target any File (notes as well as attachments such as images).
 predicate Note : File
 
-# The note's title: its base name without the ".md" extension, e.g.
-# "Internal links". This is the name wikilinks resolve against.
+# The note's names, both of which a wikilink may use:
+#   title    -- base name without ".md", e.g. "Me"        ([[Me]])
+#   absolute -- vault path without ".md", e.g. "About/Me"  ([[About/Me]])
+# For a note at the vault root the two are equal.
 predicate NoteTitle :
   {
     note : Note,
     title : string,
+    absolute : string,
+  }
+
+# A frontmatter alias of a note (an entry of the `aliases` property), promoted
+# to a first-class relation because aliases are common and are an alternate
+# name a wikilink can resolve to. The same alias text also appears as a
+# HasKeyValue of the `aliases` key.
+predicate NoteAlias :
+  {
+    note : Note,
+    alias : string,
+  }
+
+# Whether a note has a YAML frontmatter block at all (`present = false` for a
+# note with no leading `---` block). Emitted for every note so that both
+# "notes with frontmatter" and "notes without frontmatter" are direct queries
+# rather than negations.
+predicate NoteFrontmatter :
+  {
+    note : Note,
+    present : bool,
   }
 
 # ===========================================================================
@@ -125,17 +148,31 @@ predicate HasKeyValue :
 # Tags
 # ===========================================================================
 
-# A tag, stored without the leading '#', e.g. "inbox/to-read". Nested tags
-# keep their slashes. Obsidian tags are case-insensitive; the casing kept here
-# is the casing as written at the occurrence.
+# A tag, stored without the leading '#' and lower-cased, e.g. "inbox/to-read".
+# Obsidian tags are case-insensitive, so `#Tag` and `#TAG` are the same Tag
+# fact ("tag"). Nested tags keep their slashes, and every ancestor prefix of a
+# nested tag is also interned as a Tag (see TagParent), so `#2025/12/12` also
+# yields the tags "2025/12" and "2025".
 predicate Tag : string
 
 # "notes with tag": the note carries this tag, whether written inline (`#tag`)
-# in the body or listed under the `tags` frontmatter property.
+# in the body or listed under the `tags` frontmatter property. Only the tag as
+# written (its full path) is linked here; ancestors are reachable via
+# TagParent.
 predicate NoteTag :
   {
     note : Note,
     tag : Tag,
+  }
+
+# The immediate parent of a nested tag: for "2025/12/12" -> "2025/12", and for
+# "2025/12" -> "2025". A top-level tag has no TagParent fact. This makes tag
+# levels queryable -- e.g. the children of "2025/12" are exactly the tags with
+# parent "2025/12", which distinguishes "2025/12/20" from "2025/1200".
+predicate TagParent :
+  {
+    tag : Tag,
+    parent : Tag,
   }
 
 # ===========================================================================
@@ -179,7 +216,8 @@ type Anchor =
 
 # "references of a note": an internal link from `source` to another file that
 # was resolved to an actual File in the vault. `span` locates the link in the
-# source note; `anchor` names an optional heading/block within the target.
+# source note; `anchor` names an optional heading/block within the target;
+# `alias` is the display text when the link was written `[[target|alias]]`.
 # Backlinks are the reverse of this predicate -- see `Backlink` below.
 predicate Reference :
   {
@@ -188,17 +226,33 @@ predicate Reference :
     kind : LinkKind,
     span : ByteSpan,
     anchor : Anchor,
+    alias : maybe string,
   }
 
 # An internal link whose target could not be resolved to a file in the vault
 # (a dangling link). `target` is the raw link destination as written, minus
-# any alias/anchor.
+# any alias/anchor; `alias` is the display text if one was given.
 predicate UnresolvedReference :
   {
     source : Note,
     target : string,
     kind : LinkKind,
     span : ByteSpan,
+    alias : maybe string,
+  }
+
+# An alias observed in a link, keyed by the raw target text as written. From
+# `[[Foo note|Foo]]` this records target = "Foo note", alias = "Foo". Because
+# it is keyed by the written target rather than a resolved File, it also
+# captures aliases for notes that do not exist yet (`[[Does not exist|missing]]`).
+# Use it to find alias suggestions for a note: the aliases people already use
+# when linking to it, minus those already in its NoteAlias set. A note written
+# both as "Foo note" and "Folder/Foo note" is discoverable via NoteTitle's
+# `title` and `absolute`.
+predicate LinkAlias :
+  {
+    target : string,
+    alias : string,
   }
 
 # ===========================================================================

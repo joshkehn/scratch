@@ -52,8 +52,16 @@ Each file also gets a `FileName` (base name) and, when it has one, a
 `FileExtension`. This is what makes non-Markdown attachments — images, PDFs,
 audio — queryable, and it is what note references resolve *to*.
 
-A Markdown file (`.md`) additionally becomes a `Note` with a `NoteTitle` (its
-base name without `.md`, the name wikilinks resolve against).
+A `File` keeps the full vault-relative **path** as its key (`"About/Me.md"`),
+while `FileName` holds the **name** separately (`"Me.md"`).
+
+A Markdown file (`.md`) additionally becomes a `Note`. Its `NoteTitle` records
+two names a wikilink may use: the bare `title` (`"Me"`, for `[[Me]]`) and the
+vault-path `absolute` title (`"About/Me"`, for `[[About/Me]]`). Frontmatter
+`aliases` are promoted to first-class `NoteAlias` facts (a third way a link can
+resolve to the note), and `NoteFrontmatter { note, present }` is emitted for
+every note so that "has frontmatter" and "has no frontmatter" are both direct
+queries.
 
 ### Frontmatter properties → *has key / of type / with value*
 
@@ -81,10 +89,16 @@ list property emits **one `HasKeyValue` fact per element**.
 
 Tags come from both inline `#tags` in the body and the `tags` frontmatter
 property. Each distinct tag is a `Tag`; each occurrence links a note to a tag
-via `NoteTag`. Nested tags (`#area/work`) keep their slashes; numeric-only
-tokens (`#1984`) are correctly rejected, per Obsidian's rules.
+via `NoteTag`. Numeric-only tokens (`#1984`) are rejected, per Obsidian's rules.
 
-### Links → *references of a note*, and *back links*
+Tags are **lower-cased**, so `#Tag`, `#TAG` and `#tag` are the same `Tag` fact
+("tag"), matching Obsidian's case-insensitivity. Nested tags keep their
+slashes, and every ancestor prefix is also interned with a `TagParent` edge to
+its immediate parent — so `#2025/12/20` yields tags `2025/12/20`, `2025/12` and
+`2025`, with `2025/12/20 → 2025/12 → 2025`. That lets a query distinguish
+`#2025/12/20` (parent `2025/12`) from `#2025/1200` (parent `2025`).
+
+### Links → *references of a note*, *back links*, and alias suggestions
 
 Every internal link in a note body becomes a `Reference` from the source
 `Note` to the resolved target `File`:
@@ -94,9 +108,16 @@ Every internal link in a note body becomes a `Reference` from the source
 - **markdown links** `[text](Note.md)`, `[text](path/Note%20name.md)` (percent-decoded)
 - **anchors** `[[Note#Heading]]` and `[[Note#^block-id]]`
 
-Each `Reference` carries a `ByteSpan` locating the link in the source file and
-an `Anchor` (`none` / `heading` / `block`). Links that don't resolve to a file
-become an `UnresolvedReference` (dangling links) instead of being dropped.
+Each `Reference` carries a `ByteSpan` locating the link in the source file, an
+`Anchor` (`none` / `heading` / `block`), and — for `[[Note|alias]]` — the
+`alias` (a `maybe string`, omitted when absent). Links that don't resolve to a
+file become an `UnresolvedReference` (dangling links) instead of being dropped.
+
+Every aliased link also emits `LinkAlias { target, alias }`, keyed by the raw
+target text so it works even for notes that don't exist yet
+(`[[Does not exist|missing]]`). This answers *"what display names do people use
+when linking to this note?"* — the candidate aliases to add to its frontmatter,
+minus those already in `NoteAlias`.
 
 **Backlinks** are the reverse of `Reference`, provided by the on-demand derived
 predicate `Backlink { target, source }` — no `glean derive` step required.
@@ -135,6 +156,18 @@ obsidian.notes.HasKeyValue { key = "permalink", value = { text = "/" } }
 
 # Every PNG attachment in the vault
 obsidian.notes.FileExtension { extension = "png" }
+
+# Notes that have NO frontmatter
+N where obsidian.notes.NoteFrontmatter { note = N, present = false }
+
+# Alias suggestions: display names people used when linking to "Properties"
+A where obsidian.notes.LinkAlias { target = "Properties", alias = A }
+
+# Child tags one level under 2025/12 (matches #2025/12/20, not #2025/1200)
+T where obsidian.notes.TagParent { tag = T, parent = "2025/12" }
+
+# Resolve a note written either way: [[Me]] or [[About/Me]]
+N where obsidian.notes.NoteTitle { note = N, absolute = "About/Me" }
 ```
 
 ## How this supports LSP "jump between notes"
@@ -189,15 +222,17 @@ examples/sample-vault/     a small vault exercising every feature
 ## Testing
 
 ```sh
-cargo test        # 19 unit tests + 8 end-to-end tests
+cargo test        # 19 unit tests + 14 end-to-end tests
 cargo clippy      # lint-clean
 ```
 
-The unit tests cover frontmatter typing and the Markdown extractor (escaped
-pipes, angle-bracket autolinks, callout code fences, tag validity, span
-accuracy). The integration test indexes `examples/sample-vault` and asserts on
-the emitted facts (property types, resolved/unresolved references, anchors,
-bidirectional backlinks, and that code-masked tokens never leak).
+The unit tests cover frontmatter typing and the Markdown extractor (aliases,
+escaped pipes, angle-bracket autolinks, callout code fences, tag validity, span
+accuracy). The integration tests index `examples/sample-vault` and assert on
+the emitted facts: property types, resolved/unresolved references, anchors,
+link/reference aliases, first-class note aliases, frontmatter presence,
+lower-cased and nested tags, bidirectional backlinks, and that code-masked
+tokens never leak.
 
 ## Notes on the JSON format
 

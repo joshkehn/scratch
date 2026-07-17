@@ -89,6 +89,8 @@ pub struct Link {
     /// the link is a pure same-note anchor such as `[[#Heading]]`.
     pub target: String,
     pub anchor: Anchor,
+    /// The display text when written `[[target|alias]]`, else `None`.
+    pub alias: Option<String>,
     pub span: Span,
 }
 

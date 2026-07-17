@@ -25,6 +25,10 @@ An embedded image: ![[attachments/diagram.png]]
 A markdown link to [Meeting Notes](notes/Meeting%20Notes.md).
 
 A dangling link to [[Nonexistent Note]] should stay unresolved.
+A dangling aliased link [[Does not exist|missing]] still suggests an alias.
+
+Case-insensitive tags #Intro and #INTRO fold to `intro`.
+A date tag #2025/12/20 nests under 2025/12 and 2025.
 
 An external link: [Obsidian](<https://obsidian.md>).
 

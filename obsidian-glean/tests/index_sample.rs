@@ -78,8 +78,8 @@ fn note_id_by_title(facts: &Value, title: &str) -> u64 {
 #[test]
 fn file_and_note_counts() {
     let f = sample_facts();
-    assert_eq!(count(&f, ".File.1"), 5, "4 notes + 1 attachment");
-    assert_eq!(count(&f, ".Note.1"), 4);
+    assert_eq!(count(&f, ".File.1"), 6, "5 notes + 1 attachment");
+    assert_eq!(count(&f, ".Note.1"), 5);
     // The attachment has a name and an extension fact.
     let exts: HashSet<_> = keys(&f, ".FileExtension.1")
         .iter()
@@ -160,7 +160,8 @@ fn dangling_link_is_unresolved() {
         .map(|k| k["target"].as_str().unwrap().to_string())
         .collect();
     assert!(unresolved.contains("Nonexistent Note"));
-    assert_eq!(unresolved.len(), 1);
+    assert!(unresolved.contains("Does not exist"));
+    assert_eq!(unresolved.len(), 2);
 }
 
 #[test]
@@ -198,6 +199,140 @@ fn code_masked_links_and_tags_are_absent() {
             "code-fenced token leaked: {forbidden}"
         );
     }
+}
+
+/// Tag fact id -> tag name.
+fn tag_names(f: &Value) -> HashMap<u64, String> {
+    f.as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["predicate"].as_str().unwrap().ends_with(".Tag.1"))
+        .map(|b| {
+            b["facts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|x| {
+                    (
+                        x["id"].as_u64().unwrap(),
+                        x["key"].as_str().unwrap().to_string(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn note_frontmatter_presence_for_every_note() {
+    let f = sample_facts();
+    let mut present = HashMap::new();
+    for k in keys(&f, ".NoteFrontmatter.1") {
+        present.insert(
+            k["note"]["id"].as_u64().unwrap(),
+            k["present"].as_bool().unwrap(),
+        );
+    }
+    // Emitted for every note; Scratch has no frontmatter, Welcome does.
+    assert_eq!(present.len(), count(&f, ".Note.1"));
+    assert!(!present[&note_id_by_title(&f, "Scratch")]);
+    assert!(present[&note_id_by_title(&f, "Welcome")]);
+}
+
+#[test]
+fn note_has_title_and_absolute_title() {
+    let f = sample_facts();
+    let alpha = note_id_by_title(&f, "Alpha");
+    let nt = keys(&f, ".NoteTitle.1")
+        .into_iter()
+        .find(|k| k["note"]["id"].as_u64() == Some(alpha))
+        .unwrap();
+    assert_eq!(nt["title"].as_str(), Some("Alpha"));
+    assert_eq!(nt["absolute"].as_str(), Some("Projects/Alpha"));
+}
+
+#[test]
+fn frontmatter_aliases_are_first_class() {
+    let f = sample_facts();
+    let welcome = note_id_by_title(&f, "Welcome");
+    let aliases: HashSet<_> = keys(&f, ".NoteAlias.1")
+        .iter()
+        .filter(|k| k["note"]["id"].as_u64() == Some(welcome))
+        .map(|k| k["alias"].as_str().unwrap().to_string())
+        .collect();
+    assert!(aliases.contains("Home"));
+    assert!(aliases.contains("Start Here"));
+}
+
+#[test]
+fn tags_are_lowercased() {
+    let f = sample_facts();
+    let tags: HashSet<_> = keys(&f, ".Tag.1")
+        .iter()
+        .map(|k| k.as_str().unwrap().to_string())
+        .collect();
+    assert!(tags.contains("intro"));
+    assert!(!tags.contains("Intro"));
+    assert!(!tags.contains("INTRO"));
+}
+
+#[test]
+fn nested_tags_expand_to_ancestors_with_parents() {
+    let f = sample_facts();
+    let names = tag_names(&f);
+    let tags: HashSet<_> = names.values().cloned().collect();
+    for expected in ["2025", "2025/12", "2025/12/20"] {
+        assert!(tags.contains(expected), "missing ancestor tag {expected}");
+    }
+    let parents: HashSet<(String, String)> = keys(&f, ".TagParent.1")
+        .iter()
+        .map(|k| {
+            (
+                names[&k["tag"]["id"].as_u64().unwrap()].clone(),
+                names[&k["parent"]["id"].as_u64().unwrap()].clone(),
+            )
+        })
+        .collect();
+    assert!(parents.contains(&("2025/12/20".into(), "2025/12".into())));
+    assert!(parents.contains(&("2025/12".into(), "2025".into())));
+    // "2025/12/20" nests under "2025/12", which distinguishes it from a
+    // hypothetical "2025/1200" (which would nest directly under "2025").
+}
+
+#[test]
+fn reference_and_link_aliases_including_unresolved() {
+    let f = sample_facts();
+    let paths = file_paths(&f);
+
+    // The resolved wikilink [[Beta|the beta project]] carries its alias.
+    let beta_alias = keys(&f, ".Reference.1").iter().any(|k| {
+        paths
+            .get(&k["target"]["id"].as_u64().unwrap())
+            .map(String::as_str)
+            == Some("Projects/Beta.md")
+            && k.get("alias").and_then(|a| a.as_str()) == Some("the beta project")
+    });
+    assert!(beta_alias);
+
+    // LinkAlias works for a resolved target and an unresolved one.
+    let link_aliases: HashSet<(String, String)> = keys(&f, ".LinkAlias.1")
+        .iter()
+        .map(|k| {
+            (
+                k["target"].as_str().unwrap().to_string(),
+                k["alias"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert!(link_aliases.contains(&("Beta".into(), "the beta project".into())));
+    assert!(link_aliases.contains(&("Does not exist".into(), "missing".into())));
+
+    // A `maybe` alias is omitted (not null) when the link has no alias.
+    let nonexistent = keys(&f, ".UnresolvedReference.1")
+        .into_iter()
+        .find(|k| k["target"].as_str() == Some("Nonexistent Note"))
+        .unwrap();
+    assert!(nonexistent.get("alias").is_none());
 }
 
 #[test]

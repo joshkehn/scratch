@@ -94,8 +94,15 @@ pub fn index_vault(root: &Path) -> std::io::Result<(Value, Stats)> {
         let (yaml, _body, body_offset) = split_frontmatter(content);
         let properties = yaml.map(parse_properties).unwrap_or_default();
         let title = md_stem(basename(rel)).unwrap_or_else(|| basename(rel));
-        let note_id = fb.note(file_id, title);
+        // The "absolute" title is the vault path without ".md".
+        let absolute = match parent_dir(rel) {
+            Some(dir) => format!("{dir}/{title}"),
+            None => title.to_string(),
+        };
+        let note_id = fb.note(file_id, title, &absolute);
+        fb.note_frontmatter(note_id, yaml.is_some());
         for alias in aliases(&properties) {
+            fb.note_alias(note_id, &alias);
             alias_index.entry(alias).or_insert_with(|| rel.clone());
         }
         notes.push(NoteMeta {
@@ -128,10 +135,12 @@ pub fn index_vault(root: &Path) -> std::io::Result<(Value, Stats)> {
         }
         // Frontmatter tags.
         for tag in frontmatter_tags(&meta.properties) {
-            let tid = fb.tag(&tag);
-            if note_tags.insert(tid) {
-                fb.note_tag(note_id, tid);
-                stats.tags += 1;
+            if let Some(name) = normalize_tag(&tag) {
+                let tid = fb.tag(&name);
+                if note_tags.insert(tid) {
+                    fb.note_tag(note_id, tid);
+                    stats.tags += 1;
+                }
             }
         }
 
@@ -146,13 +155,16 @@ pub fn index_vault(root: &Path) -> std::io::Result<(Value, Stats)> {
             fb.block(note_id, &b.id, b.span);
         }
         for tag in &scanned.tags {
-            let tid = fb.tag(&tag.name);
-            if note_tags.insert(tid) {
-                fb.note_tag(note_id, tid);
-                stats.tags += 1;
+            if let Some(name) = normalize_tag(&tag.name) {
+                let tid = fb.tag(&name);
+                if note_tags.insert(tid) {
+                    fb.note_tag(note_id, tid);
+                    stats.tags += 1;
+                }
             }
         }
         for link in &scanned.links {
+            let alias = link.alias.as_deref();
             match resolve(
                 &link.target,
                 &meta.rel,
@@ -163,12 +175,19 @@ pub fn index_vault(root: &Path) -> std::io::Result<(Value, Stats)> {
             ) {
                 Some(target_path) => {
                     let fid = fb.file_id(&target_path).expect("resolved path interned");
-                    fb.reference(note_id, fid, link.kind, link.span, &link.anchor);
+                    fb.reference(note_id, fid, link.kind, link.span, &link.anchor, alias);
                     stats.references += 1;
                 }
                 None => {
-                    fb.unresolved_reference(note_id, &link.target, link.kind, link.span);
+                    fb.unresolved_reference(note_id, &link.target, link.kind, link.span, alias);
                     stats.unresolved += 1;
+                }
+            }
+            // An observed alias for the target text, resolved or not. Skip the
+            // trivial case where the alias just repeats the target.
+            if let Some(a) = alias {
+                if !link.target.is_empty() && a != link.target {
+                    fb.link_alias(&link.target, a);
                 }
             }
         }
@@ -258,6 +277,17 @@ fn add_name(
     ci.entry(name.to_lowercase())
         .or_default()
         .push(rel.to_string());
+}
+
+/// Normalize a tag: lower-case it (Obsidian tags are case-insensitive) and
+/// drop a trailing slash. Returns `None` if nothing meaningful remains.
+fn normalize_tag(name: &str) -> Option<String> {
+    let n = name.trim().trim_end_matches('/').to_lowercase();
+    if n.is_empty() {
+        None
+    } else {
+        Some(n)
+    }
 }
 
 fn aliases(props: &[Property]) -> Vec<String> {

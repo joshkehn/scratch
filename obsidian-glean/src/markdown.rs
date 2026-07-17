@@ -56,11 +56,19 @@ pub fn scan(body: &str, base: usize) -> NoteContent {
         } else {
             LinkKind::Wikilink
         };
-        let (target, anchor) = parse_destination(&caps[2], false);
+        let (target, anchor, parsed_alias) = parse_destination(&caps[2], false);
+        // For an embed, `|...` is a display size (e.g. `![[img.png|100]]`),
+        // not an alias.
+        let alias = if kind == LinkKind::Wikilink {
+            parsed_alias
+        } else {
+            None
+        };
         links.push(Link {
             kind,
             target,
             anchor,
+            alias,
             span: Span::new(base + m.start(), m.len()),
         });
         link_ranges.push((m.start(), m.end()));
@@ -88,11 +96,13 @@ pub fn scan(body: &str, base: usize) -> NoteContent {
         } else {
             LinkKind::Markdown
         };
-        let (target, anchor) = parse_destination(dest, true);
+        // A Markdown destination has no wikilink-style `|alias`.
+        let (target, anchor, _) = parse_destination(dest, true);
         links.push(Link {
             kind,
             target,
             anchor,
+            alias: None,
             span: Span::new(base + m.start(), m.len()),
         });
         link_ranges.push((m.start(), m.end()));
@@ -166,17 +176,24 @@ fn scan_lines(body: &str, base: usize, fenced: &[(usize, usize)]) -> (Vec<Headin
     (headings, blocks)
 }
 
-/// Split a link destination into a target path and an anchor.
-/// `[[path#heading]]`, `[[path#^block]]`, `[[path|alias]]`, `[[#heading]]`.
-/// When `decode` is set (Markdown links), the path is percent-decoded.
-fn parse_destination(raw: &str, decode: bool) -> (String, Anchor) {
-    // Alias (`|display`) is not part of the target; drop it. Wikilinks use
-    // `|`; Markdown links never reach here with one. In tables the pipe is
-    // escaped as `\|`, so strip the trailing backslash left behind.
-    let without_alias = raw.split('|').next().unwrap_or(raw).trim_end_matches('\\');
-    let (path, frag) = match without_alias.split_once('#') {
+/// Split a link destination into a target path, an anchor, and a display
+/// alias. `[[path#heading|alias]]`, `[[path#^block]]`, `[[#heading]]`.
+/// The alias is the text after the first `|` (only wikilinks carry one); in
+/// tables the pipe is escaped as `\|`, so the target part may keep a trailing
+/// backslash. When `decode` is set (Markdown links), the path is
+/// percent-decoded.
+fn parse_destination(raw: &str, decode: bool) -> (String, Anchor, Option<String>) {
+    let (before_alias, alias) = match raw.split_once('|') {
+        Some((left, right)) => {
+            let a = right.trim().replace("\\|", "|");
+            let alias = (!a.is_empty()).then_some(a);
+            (left.trim_end_matches('\\'), alias)
+        }
+        None => (raw, None),
+    };
+    let (path, frag) = match before_alias.split_once('#') {
         Some((p, f)) => (p, Some(f)),
-        None => (without_alias, None),
+        None => (before_alias, None),
     };
     let anchor = match frag {
         None | Some("") => Anchor::None,
@@ -192,7 +209,7 @@ fn parse_destination(raw: &str, decode: bool) -> (String, Anchor) {
     if decode {
         target = percent_decode(&target);
     }
-    (target, anchor)
+    (target, anchor, alias)
 }
 
 /// True if a Markdown link destination points outside the vault (has a URL
@@ -393,7 +410,9 @@ mod tests {
         let nc = scan("[[Note#Heading|shown]] and [[Note#^blk]] and [[#Self]]", 0);
         assert_eq!(nc.links[0].target, "Note");
         assert_eq!(nc.links[0].anchor, Anchor::Heading("Heading".into()));
+        assert_eq!(nc.links[0].alias, Some("shown".to_string()));
         assert_eq!(nc.links[1].anchor, Anchor::Block("blk".into()));
+        assert_eq!(nc.links[1].alias, None);
         assert_eq!(nc.links[2].target, "");
         assert_eq!(nc.links[2].anchor, Anchor::Heading("Self".into()));
     }
@@ -402,7 +421,9 @@ mod tests {
     fn strips_escaped_pipe_in_tables() {
         let nc = scan("| ![[Engelbart.jpg\\|100]] | [[Basic\\|Markdown]] |", 0);
         assert_eq!(nc.links[0].target, "Engelbart.jpg");
+        assert_eq!(nc.links[0].alias, None); // embed `|100` is a size, not an alias
         assert_eq!(nc.links[1].target, "Basic");
+        assert_eq!(nc.links[1].alias, Some("Markdown".to_string()));
     }
 
     #[test]
