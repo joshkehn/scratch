@@ -78,8 +78,8 @@ fn note_id_by_title(facts: &Value, title: &str) -> u64 {
 #[test]
 fn file_and_note_counts() {
     let f = sample_facts();
-    assert_eq!(count(&f, ".File.1"), 6, "5 notes + 1 attachment");
-    assert_eq!(count(&f, ".Note.1"), 5);
+    assert_eq!(count(&f, ".File.1"), 7, "6 notes + 1 attachment");
+    assert_eq!(count(&f, ".Note.1"), 6);
     // The attachment has a name and an extension fact.
     let exts: HashSet<_> = keys(&f, ".FileExtension.1")
         .iter()
@@ -333,6 +333,105 @@ fn reference_and_link_aliases_including_unresolved() {
         .find(|k| k["target"].as_str() == Some("Nonexistent Note"))
         .unwrap();
     assert!(nonexistent.get("alias").is_none());
+}
+
+/// fact id -> field, for a predicate whose facts have ids.
+fn id_field(f: &Value, suffix: &str, field: &str) -> HashMap<u64, String> {
+    f.as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["predicate"].as_str().unwrap().ends_with(suffix))
+        .map(|b| {
+            b["facts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|x| {
+                    (
+                        x["id"].as_u64().unwrap(),
+                        x["key"][field].as_str().unwrap().to_string(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn code_blocks_capture_language() {
+    let f = sample_facts();
+    let langs: HashSet<_> = keys(&f, ".CodeBlock.1")
+        .iter()
+        .map(|k| k["language"].as_str().unwrap().to_string())
+        .collect();
+    assert!(langs.contains("php"));
+    assert!(
+        langs.contains(""),
+        "the plain fenced block has empty language"
+    );
+}
+
+#[test]
+fn todos_capture_checked_state_and_inner_links_and_tags() {
+    let f = sample_facts();
+    let paths = file_paths(&f);
+    let tags = tag_names(&f);
+    let todos = id_field(&f, ".Todo.1", "text");
+
+    let states: HashSet<bool> = keys(&f, ".Todo.1")
+        .iter()
+        .map(|k| k["checked"].as_bool().unwrap())
+        .collect();
+    assert!(states.contains(&true) && states.contains(&false));
+
+    let review = *todos.iter().find(|(_, t)| t.contains("Review")).unwrap().0;
+    let linked = keys(&f, ".TodoLink.1").iter().any(|k| {
+        k["todo"]["id"].as_u64() == Some(review)
+            && paths[&k["target"]["id"].as_u64().unwrap()] == "Projects/Alpha.md"
+    });
+    assert!(linked, "task should link [[Projects/Alpha]]");
+    let tagged = keys(&f, ".TodoTag.1").iter().any(|k| {
+        k["todo"]["id"].as_u64() == Some(review)
+            && tags[&k["tag"]["id"].as_u64().unwrap()] == "meeting"
+    });
+    assert!(tagged, "task should tag #meeting");
+}
+
+#[test]
+fn html_elements_and_attributes() {
+    let f = sample_facts();
+    let el = id_field(&f, ".HtmlElement.1", "name");
+    let names: HashSet<_> = el.values().cloned().collect();
+    for expected in ["span", "br", "img"] {
+        assert!(names.contains(expected), "missing element {expected}");
+    }
+    // The user's query: an element that sets a `style` property.
+    let span_style = keys(&f, ".HtmlAttribute.1").iter().any(|k| {
+        el.get(&k["element"]["id"].as_u64().unwrap())
+            .map(String::as_str)
+            == Some("span")
+            && k["name"].as_str() == Some("style")
+    });
+    assert!(span_style);
+}
+
+#[test]
+fn reference_style_links_resolve_and_skip_external() {
+    let f = sample_facts();
+    let features = note_id_by_title(&f, "Features");
+    let paths = file_paths(&f);
+    // `[the Alpha note][alpha]` / `[alpha][]` resolve to Projects/Alpha.md.
+    let resolved = keys(&f, ".Reference.1").iter().any(|k| {
+        k["source"]["id"].as_u64() == Some(features)
+            && k["kind"].as_u64() == Some(2)
+            && paths[&k["target"]["id"].as_u64().unwrap()] == "Projects/Alpha.md"
+    });
+    assert!(resolved);
+    // The external `[ext]` definition is not emitted as any reference.
+    let ext_leaked = keys(&f, ".UnresolvedReference.1")
+        .iter()
+        .any(|k| k["target"].as_str().unwrap().contains("example.com"));
+    assert!(!ext_leaked);
 }
 
 #[test]

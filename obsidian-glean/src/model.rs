@@ -116,6 +116,39 @@ pub struct TagOccurrence {
     pub span: Span,
 }
 
+/// A fenced code block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeBlock {
+    /// The info-string language, lower-cased (empty if none).
+    pub language: String,
+    /// Byte range of the whole block, fences included.
+    pub span: Span,
+}
+
+/// A task-list item (`- [ ] ...` / `- [x] ...`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Todo {
+    pub checked: bool,
+    pub text: String,
+    /// Byte range of the whole item line (used to attribute links/tags to it).
+    pub span: Span,
+}
+
+/// An attribute on an HTML element.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HtmlAttr {
+    pub name: String,
+    pub value: String,
+}
+
+/// An inline HTML element occurrence (an opening or self-closing tag).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HtmlElement {
+    pub name: String,
+    pub span: Span,
+    pub attrs: Vec<HtmlAttr>,
+}
+
 /// Everything extracted from a single note body (excludes frontmatter, which
 /// is parsed separately into `Property`s and tags).
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -124,4 +157,7 @@ pub struct NoteContent {
     pub headings: Vec<Heading>,
     pub blocks: Vec<BlockId>,
     pub tags: Vec<TagOccurrence>,
+    pub code_blocks: Vec<CodeBlock>,
+    pub todos: Vec<Todo>,
+    pub html: Vec<HtmlElement>,
 }

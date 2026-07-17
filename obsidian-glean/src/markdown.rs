@@ -1,13 +1,18 @@
 //! Extraction of Obsidian-flavored Markdown constructs from a note body:
-//! wikilinks, embeds, Markdown links, headings, block identifiers and tags.
+//! wikilinks, embeds, Markdown links (inline and reference-style), headings,
+//! block identifiers, tags, fenced code blocks, task items and inline HTML.
 //!
 //! Links and tags inside fenced code blocks and inline code spans are ignored,
 //! matching how Obsidian renders them. All spans are reported in byte
 //! coordinates of the *whole file*, i.e. `base` (the byte offset of the body
 //! after any frontmatter) is added to every offset.
 
-use crate::model::{Anchor, BlockId, Heading, Link, LinkKind, NoteContent, Span, TagOccurrence};
+use crate::model::{
+    Anchor, BlockId, CodeBlock, Heading, HtmlAttr, HtmlElement, Link, LinkKind, NoteContent, Span,
+    TagOccurrence, Todo,
+};
 use regex::Regex;
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 fn wikilink_re() -> &'static Regex {
@@ -36,9 +41,52 @@ fn tag_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"(?:^|[\s>(])(#[\p{L}\p{N}_/-]+)").unwrap())
 }
 
+/// A link reference definition line: `[label]: destination "optional title"`.
+fn linkdef_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"^ {0,3}\[([^\]\n]+)\]:\s+(\S+)"#).unwrap())
+}
+
+/// A full/collapsed reference link usage: `[text][label]` or `[label][]`.
+fn reflink_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\[([^\[\]\n]*)\]\[([^\[\]\n]*)\]").unwrap())
+}
+
+/// A bracketed span `[label]`, used to find shortcut reference links.
+fn shortcut_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\[([^\[\]\n]+)\]").unwrap())
+}
+
+/// A task-list item: `- [ ] text` / `- [x] text` (also `*`/`+` markers).
+fn todo_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^\s*[-*+]\s+\[(.)\]\s+(.*\S)\s*$").unwrap())
+}
+
+/// An inline HTML opening or self-closing tag (quotes may contain `>`). The
+/// name excludes `:` so scheme autolinks like `<http://x>` are not matched.
+fn html_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"<([a-zA-Z][a-zA-Z0-9-]*)((?:[^>"']|"[^"]*"|'[^']*')*)>"#).unwrap()
+    })
+}
+
+/// One HTML attribute: `name`, `name=value`, `name="value"`, `name='value'`.
+fn html_attr_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"([a-zA-Z_:][-a-zA-Z0-9_:.]*)(?:\s*=\s*("[^"]*"|'[^']*'|[^\s"'=<>`]+))?"#)
+            .unwrap()
+    })
+}
+
 /// Extract everything of interest from a note body.
 pub fn scan(body: &str, base: usize) -> NoteContent {
-    let fenced = fenced_ranges(body);
+    let code = fenced_blocks(body);
+    let fenced: Vec<(usize, usize)> = code.iter().map(|b| (b.start, b.end)).collect();
     let inline = inline_code_ranges(body, &fenced);
 
     // Links first, so their spans can mask out tags (e.g. the `#` in
@@ -108,6 +156,25 @@ pub fn scan(body: &str, base: usize) -> NoteContent {
         link_ranges.push((m.start(), m.end()));
     }
 
+    // Reference-style Markdown links (`[text][ref]`, `[ref][]`, `[ref]`), using
+    // the link reference definitions collected from the whole document.
+    let (defs, def_ranges) = link_definitions(body, &fenced);
+    for link in reference_links(
+        body,
+        base,
+        &defs,
+        &fenced,
+        &inline,
+        &def_ranges,
+        &link_ranges,
+    ) {
+        link_ranges.push((
+            link.span.start - base,
+            link.span.start - base + link.span.length,
+        ));
+        links.push(link);
+    }
+
     let mut tags = Vec::new();
     for caps in tag_re().captures_iter(body) {
         let g = caps.get(1).unwrap();
@@ -127,20 +194,38 @@ pub fn scan(body: &str, base: usize) -> NoteContent {
         });
     }
 
-    let (headings, blocks) = scan_lines(body, base, &fenced);
+    let (headings, blocks, todos) = scan_lines(body, base, &fenced);
+
+    let code_blocks = code
+        .iter()
+        .map(|b| CodeBlock {
+            language: b.language.clone(),
+            span: Span::new(base + b.start, b.end - b.start),
+        })
+        .collect();
+
+    let html = scan_html(body, base, &fenced, &inline);
 
     NoteContent {
         links,
         headings,
         blocks,
         tags,
+        code_blocks,
+        todos,
+        html,
     }
 }
 
-/// Line-based extraction of headings and block identifiers.
-fn scan_lines(body: &str, base: usize, fenced: &[(usize, usize)]) -> (Vec<Heading>, Vec<BlockId>) {
+/// Line-based extraction of headings, task items and block identifiers.
+fn scan_lines(
+    body: &str,
+    base: usize,
+    fenced: &[(usize, usize)],
+) -> (Vec<Heading>, Vec<BlockId>, Vec<Todo>) {
     let mut headings = Vec::new();
     let mut blocks = Vec::new();
+    let mut todos = Vec::new();
     let mut offset = 0usize;
     for line in body.split_inclusive('\n') {
         let line_start = offset;
@@ -165,6 +250,17 @@ fn scan_lines(body: &str, base: usize, fenced: &[(usize, usize)]) -> (Vec<Headin
             continue;
         }
 
+        if let Some(caps) = todo_re().captures(content) {
+            // The span covers the whole item line, so links/tags on the line
+            // can be attributed to this task by containment.
+            todos.push(Todo {
+                checked: &caps[1] != " ",
+                text: caps[2].trim().to_string(),
+                span: Span::new(base + line_start, content.len()),
+            });
+            continue;
+        }
+
         if let Some(caps) = block_re().captures(content) {
             let g = caps.get(1).unwrap();
             blocks.push(BlockId {
@@ -173,7 +269,7 @@ fn scan_lines(body: &str, base: usize, fenced: &[(usize, usize)]) -> (Vec<Headin
             });
         }
     }
-    (headings, blocks)
+    (headings, blocks, todos)
 }
 
 /// Split a link destination into a target path, an anchor, and a display
@@ -261,11 +357,207 @@ pub fn is_valid_tag(name: &str) -> bool {
     !name.is_empty() && name.chars().any(|c| !c.is_ascii_digit())
 }
 
-/// Byte ranges of fenced code blocks (``` / ~~~), including the fence lines.
-/// An unclosed fence extends to the end of the body.
-fn fenced_ranges(body: &str) -> Vec<(usize, usize)> {
+/// Collect link reference definitions (`[label]: dest`), returning a map from
+/// normalized label to destination plus the byte ranges of the definition
+/// lines. Footnote definitions (`[^label]: ...`) are ignored.
+fn link_definitions(
+    body: &str,
+    fenced: &[(usize, usize)],
+) -> (HashMap<String, String>, Vec<(usize, usize)>) {
+    let mut defs = HashMap::new();
     let mut ranges = Vec::new();
-    let mut open: Option<(u8, usize, usize)> = None; // (fence byte, count, start)
+    let mut offset = 0usize;
+    for line in body.split_inclusive('\n') {
+        let line_start = offset;
+        let line_end = offset + line.len();
+        offset = line_end;
+        if in_ranges(line_start, fenced) {
+            continue;
+        }
+        let content = line.trim_end_matches('\n').trim_end_matches('\r');
+        if let Some(caps) = linkdef_re().captures(content) {
+            let label = &caps[1];
+            if label.starts_with('^') {
+                continue; // footnote definition, not a link definition
+            }
+            defs.entry(normalize_label(label))
+                .or_insert_with(|| caps[2].to_string());
+            ranges.push((line_start, line_end));
+        }
+    }
+    (defs, ranges)
+}
+
+/// Normalize a reference label the way CommonMark does: trim, collapse internal
+/// whitespace, and lower-case.
+fn normalize_label(label: &str) -> String {
+    label
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// Resolve a reference-style link usage against the definitions into a `Link`,
+/// or `None` when the label is undefined or the destination is external.
+fn make_ref_link(
+    defs: &HashMap<String, String>,
+    label: &str,
+    base: usize,
+    m: &regex::Match,
+) -> Option<Link> {
+    let dest = defs.get(&normalize_label(label))?;
+    let raw = dest.trim();
+    let d = raw
+        .strip_prefix('<')
+        .map(|r| r.split('>').next().unwrap_or(r))
+        .unwrap_or(raw);
+    if d.is_empty() || is_external(d) {
+        return None;
+    }
+    let (target, anchor, _) = parse_destination(d, true);
+    Some(Link {
+        kind: LinkKind::Markdown,
+        target,
+        anchor,
+        alias: None,
+        span: Span::new(base + m.start(), m.len()),
+    })
+}
+
+/// Reference-style Markdown links: full (`[text][label]`), collapsed
+/// (`[label][]`) and shortcut (`[label]`), each resolved against `defs`.
+fn reference_links(
+    body: &str,
+    base: usize,
+    defs: &HashMap<String, String>,
+    fenced: &[(usize, usize)],
+    inline: &[(usize, usize)],
+    def_ranges: &[(usize, usize)],
+    link_ranges: &[(usize, usize)],
+) -> Vec<Link> {
+    if defs.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut used: Vec<(usize, usize)> = link_ranges.to_vec();
+    let masked = |pos: usize, used: &[(usize, usize)]| {
+        in_ranges(pos, fenced)
+            || in_ranges(pos, inline)
+            || in_ranges(pos, def_ranges)
+            || in_ranges(pos, used)
+    };
+
+    // Full and collapsed: `[text][label]` / `[label][]`.
+    for caps in reflink_re().captures_iter(body) {
+        let m = caps.get(0).unwrap();
+        if masked(m.start(), &used) {
+            continue;
+        }
+        let label = if caps[2].trim().is_empty() {
+            &caps[1]
+        } else {
+            &caps[2]
+        };
+        if let Some(link) = make_ref_link(defs, label, base, &m) {
+            used.push((m.start(), m.end()));
+            out.push(link);
+        }
+    }
+
+    // Shortcut: `[label]`, only where a definition exists and it is not part of
+    // a wikilink, image, inline link, full reference, or a definition line.
+    for caps in shortcut_re().captures_iter(body) {
+        let m = caps.get(0).unwrap();
+        if masked(m.start(), &used) {
+            continue;
+        }
+        let prev = body[..m.start()].chars().next_back();
+        let next = body[m.end()..].chars().next();
+        if matches!(prev, Some('[') | Some('!'))
+            || matches!(next, Some('(') | Some('[') | Some(':'))
+        {
+            continue;
+        }
+        let label = &caps[1];
+        if label.starts_with('^') {
+            continue; // footnote reference
+        }
+        if let Some(link) = make_ref_link(defs, label, base, &m) {
+            used.push((m.start(), m.end()));
+            out.push(link);
+        }
+    }
+    out
+}
+
+/// Inline HTML element occurrences (opening / self-closing tags), skipping
+/// code. Closing tags (`</div>`) and scheme/email autolinks are not matched.
+fn scan_html(
+    body: &str,
+    base: usize,
+    fenced: &[(usize, usize)],
+    inline: &[(usize, usize)],
+) -> Vec<HtmlElement> {
+    let mut out = Vec::new();
+    for caps in html_re().captures_iter(body) {
+        let m = caps.get(0).unwrap();
+        if in_ranges(m.start(), fenced) || in_ranges(m.start(), inline) {
+            continue;
+        }
+        // A real tag's attribute region is empty, or starts with whitespace or
+        // a self-closing '/'. Anything else (e.g. `<foo@bar.com>`) is not HTML.
+        let blob = &caps[2];
+        if let Some(c) = blob.chars().next() {
+            if !c.is_whitespace() && c != '/' {
+                continue;
+            }
+        }
+        let name = caps[1].to_lowercase();
+        let mut attrs = Vec::new();
+        for a in html_attr_re().captures_iter(blob.trim_end_matches('/')) {
+            let attr_name = a[1].to_lowercase();
+            let value = a
+                .get(2)
+                .map(|v| strip_quotes(v.as_str()))
+                .unwrap_or_default();
+            attrs.push(HtmlAttr {
+                name: attr_name,
+                value,
+            });
+        }
+        out.push(HtmlElement {
+            name,
+            span: Span::new(base + m.start(), m.len()),
+            attrs,
+        });
+    }
+    out
+}
+
+/// Strip matching surrounding single/double quotes from an attribute value.
+fn strip_quotes(s: &str) -> String {
+    let b = s.as_bytes();
+    if b.len() >= 2 && (b[0] == b'"' || b[0] == b'\'') && b[b.len() - 1] == b[0] {
+        s[1..s.len() - 1].to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+/// A fenced code block: its byte range (fences included) and info-string
+/// language, lower-cased.
+struct FencedBlock {
+    start: usize,
+    end: usize,
+    language: String,
+}
+
+/// Fenced code blocks (``` / ~~~). An unclosed fence extends to end of body.
+fn fenced_blocks(body: &str) -> Vec<FencedBlock> {
+    let mut blocks = Vec::new();
+    // (fence byte, count, start offset, language)
+    let mut open: Option<(u8, usize, usize, String)> = None;
     let mut offset = 0usize;
     for line in body.split_inclusive('\n') {
         let line_start = offset;
@@ -290,23 +582,38 @@ fn fenced_ranges(body: &str) -> Vec<(usize, usize)> {
         }
         let fb = fence_byte.unwrap();
         let count = trimmed.bytes().take_while(|&b| b == fb).count();
-        match open {
-            None => open = Some((fb, count, line_start)),
-            Some((ofb, ocount, ostart)) => {
+        match &open {
+            None => {
+                let language = trimmed[count..]
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_lowercase();
+                open = Some((fb, count, line_start, language));
+            }
+            Some((ofb, ocount, ostart, language)) => {
                 let rest = &trimmed[count..];
                 // A closing fence matches the opening char, is at least as
                 // long, and carries no info string.
-                if fb == ofb && count >= ocount && rest.trim().is_empty() {
-                    ranges.push((ostart, line_end));
+                if fb == *ofb && count >= *ocount && rest.trim().is_empty() {
+                    blocks.push(FencedBlock {
+                        start: *ostart,
+                        end: line_end,
+                        language: language.clone(),
+                    });
                     open = None;
                 }
             }
         }
     }
-    if let Some((_, _, ostart)) = open {
-        ranges.push((ostart, body.len()));
+    if let Some((_, _, ostart, language)) = open {
+        blocks.push(FencedBlock {
+            start: ostart,
+            end: body.len(),
+            language,
+        });
     }
-    ranges
+    blocks
 }
 
 /// Byte ranges of inline code spans (backtick-delimited), scanned per line and
@@ -498,5 +805,75 @@ mod tests {
         // The '#Heading' inside the wikilink must not be read as a tag.
         let nc = scan("[[Note#Heading]]", 0);
         assert!(nc.tags.is_empty());
+    }
+
+    #[test]
+    fn reference_style_links_full_collapsed_shortcut() {
+        let body = "See [text][ref], [ref2][], and [ref3].\n\n\
+                    [ref]: Target\n[ref2]: Other\n[ref3]: Third\n";
+        let nc = scan(body, 0);
+        let targets: Vec<_> = nc.links.iter().map(|l| l.target.as_str()).collect();
+        assert!(targets.contains(&"Target"));
+        assert!(targets.contains(&"Other"));
+        assert!(targets.contains(&"Third"));
+        assert!(nc.links.iter().all(|l| l.kind == LinkKind::Markdown));
+    }
+
+    #[test]
+    fn footnotes_are_not_links() {
+        let nc = scan("A claim.[^1]\n\n[^1]: the footnote text.\n", 0);
+        assert!(nc.links.is_empty());
+    }
+
+    #[test]
+    fn external_reference_definition_is_skipped() {
+        let nc = scan("Read [more][x].\n\n[x]: https://example.com\n", 0);
+        assert!(nc.links.is_empty());
+    }
+
+    #[test]
+    fn code_block_language_and_plain() {
+        let nc = scan("```php\n<?php echo 1;\n```\n\n```\nplain\n```\n", 0);
+        let langs: Vec<_> = nc.code_blocks.iter().map(|c| c.language.as_str()).collect();
+        assert_eq!(langs, vec!["php", ""]);
+    }
+
+    #[test]
+    fn todos_checked_and_unchecked() {
+        let nc = scan("- [ ] open\n- [x] done\n- not a task\n", 0);
+        assert_eq!(nc.todos.len(), 2);
+        assert!(!nc.todos[0].checked);
+        assert!(nc.todos[1].checked);
+        assert_eq!(nc.todos[0].text, "open");
+    }
+
+    #[test]
+    fn html_elements_and_attributes_parsed() {
+        let nc = scan(
+            r#"<span style="color: red" class="x">hi</span> and <br>"#,
+            0,
+        );
+        assert_eq!(nc.html.len(), 2);
+        let span = nc.html.iter().find(|e| e.name == "span").unwrap();
+        assert!(span
+            .attrs
+            .iter()
+            .any(|a| a.name == "style" && a.value == "color: red"));
+        assert!(nc.html.iter().any(|e| e.name == "br" && e.attrs.is_empty()));
+    }
+
+    #[test]
+    fn autolinks_are_not_html_elements() {
+        let nc = scan("Visit <https://example.com> or email <a@b.com>.", 0);
+        assert!(nc.html.is_empty());
+    }
+
+    #[test]
+    fn code_fence_masks_html_and_tasks() {
+        let nc = scan("```html\n<div style=\"x\">y</div>\n- [ ] fake\n```\n", 0);
+        assert!(nc.html.is_empty());
+        assert!(nc.todos.is_empty());
+        assert_eq!(nc.code_blocks.len(), 1);
+        assert_eq!(nc.code_blocks[0].language, "html");
     }
 }

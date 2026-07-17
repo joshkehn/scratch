@@ -25,6 +25,12 @@ const P_HAS_KEY_TYPE: &str = "obsidian.notes.HasKeyType.1";
 const P_HAS_KEY_VALUE: &str = "obsidian.notes.HasKeyValue.1";
 const P_HEADING: &str = "obsidian.notes.Heading.1";
 const P_BLOCK: &str = "obsidian.notes.Block.1";
+const P_CODE_BLOCK: &str = "obsidian.notes.CodeBlock.1";
+const P_TODO: &str = "obsidian.notes.Todo.1";
+const P_TODO_LINK: &str = "obsidian.notes.TodoLink.1";
+const P_TODO_TAG: &str = "obsidian.notes.TodoTag.1";
+const P_HTML_ELEMENT: &str = "obsidian.notes.HtmlElement.1";
+const P_HTML_ATTRIBUTE: &str = "obsidian.notes.HtmlAttribute.1";
 const P_REFERENCE: &str = "obsidian.notes.Reference.1";
 const P_UNRESOLVED: &str = "obsidian.notes.UnresolvedReference.1";
 const P_LINK_ALIAS: &str = "obsidian.notes.LinkAlias.1";
@@ -47,6 +53,12 @@ const PREDICATE_ORDER: &[&str] = &[
     P_HAS_KEY_VALUE,
     P_HEADING,
     P_BLOCK,
+    P_CODE_BLOCK,
+    P_TODO,
+    P_TODO_LINK,
+    P_TODO_TAG,
+    P_HTML_ELEMENT,
+    P_HTML_ATTRIBUTE,
     P_REFERENCE,
     P_UNRESOLVED,
     P_LINK_ALIAS,
@@ -219,6 +231,67 @@ impl FactBuilder {
                 "id": id,
                 "span": span_json(span),
             }}),
+        );
+    }
+
+    pub fn code_block(&mut self, note_id: u64, language: &str, span: Span) {
+        self.push(
+            P_CODE_BLOCK,
+            json!({ "key": {
+                "note": { "id": note_id },
+                "language": language,
+                "span": span_json(span),
+            }}),
+        );
+    }
+
+    /// Emit a `Todo` and return its fact id (referenced by TodoLink/TodoTag).
+    pub fn todo(&mut self, note_id: u64, checked: bool, text: &str, span: Span) -> u64 {
+        let id = self.alloc_id();
+        self.push(
+            P_TODO,
+            json!({ "id": id, "key": {
+                "note": { "id": note_id },
+                "checked": checked,
+                "text": text,
+                "span": span_json(span),
+            }}),
+        );
+        id
+    }
+
+    pub fn todo_link(&mut self, todo_id: u64, target_file_id: u64) {
+        self.push(
+            P_TODO_LINK,
+            json!({ "key": { "todo": { "id": todo_id }, "target": { "id": target_file_id } } }),
+        );
+    }
+
+    pub fn todo_tag(&mut self, todo_id: u64, tag_id: u64) {
+        self.push(
+            P_TODO_TAG,
+            json!({ "key": { "todo": { "id": todo_id }, "tag": { "id": tag_id } } }),
+        );
+    }
+
+    /// Emit an `HtmlElement` and return its fact id (referenced by HtmlAttribute).
+    pub fn html_element(&mut self, note_id: u64, name: &str, span: Span) -> u64 {
+        let id = self.alloc_id();
+        self.push(
+            P_HTML_ELEMENT,
+            json!({ "id": id, "key": {
+                "note": { "id": note_id },
+                "name": name,
+                "span": span_json(span),
+            }}),
+        );
+        id
+    }
+
+    pub fn html_attribute(&mut self, element_id: u64, name: &str, value: &str) {
+        self.push(
+            P_HTML_ATTRIBUTE,
+            json!({ "key": { "element": { "id": element_id }, "name": name, "value": value } }),
         );
     }
 

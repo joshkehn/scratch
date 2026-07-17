@@ -148,6 +148,26 @@ pub fn index_vault(root: &Path) -> std::io::Result<(Value, Stats)> {
         let body = &content[meta.body_offset..];
         let scanned = markdown::scan(body, meta.body_offset);
 
+        // Task items first, so links/tags on a task line can be attributed to
+        // the task by span containment. `todo_ranges` is (todo id, start, end).
+        let todo_ranges: Vec<(u64, usize, usize)> = scanned
+            .todos
+            .iter()
+            .map(|t| {
+                let id = fb.todo(note_id, t.checked, &t.text, t.span);
+                (id, t.span.start, t.span.start + t.span.length)
+            })
+            .collect();
+        for cb in &scanned.code_blocks {
+            fb.code_block(note_id, &cb.language, cb.span);
+        }
+        for el in &scanned.html {
+            let eid = fb.html_element(note_id, &el.name, el.span);
+            for attr in &el.attrs {
+                fb.html_attribute(eid, &attr.name, &attr.value);
+            }
+        }
+
         for h in &scanned.headings {
             fb.heading(note_id, &h.text, h.level, h.span);
         }
@@ -160,6 +180,9 @@ pub fn index_vault(root: &Path) -> std::io::Result<(Value, Stats)> {
                 if note_tags.insert(tid) {
                     fb.note_tag(note_id, tid);
                     stats.tags += 1;
+                }
+                if let Some(todo_id) = containing_todo(tag.span.start, &todo_ranges) {
+                    fb.todo_tag(todo_id, tid);
                 }
             }
         }
@@ -177,6 +200,9 @@ pub fn index_vault(root: &Path) -> std::io::Result<(Value, Stats)> {
                     let fid = fb.file_id(&target_path).expect("resolved path interned");
                     fb.reference(note_id, fid, link.kind, link.span, &link.anchor, alias);
                     stats.references += 1;
+                    if let Some(todo_id) = containing_todo(link.span.start, &todo_ranges) {
+                        fb.todo_link(todo_id, fid);
+                    }
                 }
                 None => {
                     fb.unresolved_reference(note_id, &link.target, link.kind, link.span, alias);
@@ -277,6 +303,14 @@ fn add_name(
     ci.entry(name.to_lowercase())
         .or_default()
         .push(rel.to_string());
+}
+
+/// The id of the task item whose line span contains `pos`, if any.
+fn containing_todo(pos: usize, todos: &[(u64, usize, usize)]) -> Option<u64> {
+    todos
+        .iter()
+        .find(|&&(_, start, end)| pos >= start && pos < end)
+        .map(|&(id, _, _)| id)
 }
 
 /// Normalize a tag: lower-case it (Obsidian tags are case-insensitive) and

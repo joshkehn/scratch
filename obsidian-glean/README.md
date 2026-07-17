@@ -2,8 +2,9 @@
 
 A [Glean](https://glean.software) indexer for [Obsidian](https://obsidian.md)
 vaults. It walks a vault on disk, parses the Markdown notes the way Obsidian
-does (YAML frontmatter, wikilinks, embeds, tags, headings, block IDs), and
-emits **Glean facts as JSON** for the `obsidian.notes` schema.
+does (YAML frontmatter, wikilinks, embeds, reference-style links, tags,
+headings, block IDs, code blocks, tasks, inline HTML), and emits **Glean facts
+as JSON** for the `obsidian.notes` schema.
 
 The point is to turn a vault into a queryable graph so that tooling — for
 example a Language Server that lets you jump between notes, list backlinks, or
@@ -106,6 +107,8 @@ Every internal link in a note body becomes a `Reference` from the source
 - **wikilinks** `[[Note]]`, `[[Note|alias]]`, `[[folder/Note]]`, `[[Note.md]]`
 - **embeds** `![[Note]]`, `![[image.png]]`, `![[image.png|200]]` (table-escaped `\|` handled)
 - **markdown links** `[text](Note.md)`, `[text](path/Note%20name.md)` (percent-decoded)
+- **reference-style links** `[text][ref]`, `[ref][]`, `[ref]` with a `[ref]: dest`
+  definition elsewhere in the note (footnotes `[^1]` are not links)
 - **anchors** `[[Note#Heading]]` and `[[Note#^block-id]]`
 
 Each `Reference` carries a `ByteSpan` locating the link in the source file, an
@@ -124,6 +127,22 @@ predicate `Backlink { target, source }` — no `glean derive` step required.
 
 Headings (`Heading`) and block IDs (`Block`) are emitted with their own spans,
 so an anchor like `#Heading` or `#^block-id` can be resolved to a jump target.
+
+### Code blocks, tasks, and inline HTML
+
+Other common note content is indexed too:
+
+- **`CodeBlock { note, language, span }`** — one per fenced block; `language`
+  is the info-string language lower-cased (`""` when none). Find notes with a
+  PHP block: `CodeBlock { language = "php" }`.
+- **`Todo { note, checked, text, span }`** — task-list items (`- [ ]` /
+  `- [x]`); `checked` is false only for a blank `[ ]`. Notes and tags mentioned
+  inside a task are attributed to it via **`TodoLink { todo, target }`** and
+  **`TodoTag { todo, tag }`**, so you can ask "unchecked tasks that reference
+  note X" or "tasks tagged #urgent".
+- **`HtmlElement { note, name, span }`** + **`HtmlAttribute { element, name,
+  value }`** — inline HTML (`name`/attribute names lower-cased). Find notes with
+  any element that sets a style: filter `HtmlAttribute { name = "style" }`.
 
 ## Example Angle queries
 
@@ -168,6 +187,19 @@ T where obsidian.notes.TagParent { tag = T, parent = "2025/12" }
 
 # Resolve a note written either way: [[Me]] or [[About/Me]]
 N where obsidian.notes.NoteTitle { note = N, absolute = "About/Me" }
+
+# Notes containing a PHP code block
+N where obsidian.notes.CodeBlock { note = N, language = "php" }
+
+# Unchecked tasks that reference another note
+T where
+  obsidian.notes.Todo { checked = false } = T;
+  obsidian.notes.TodoLink { todo = T }
+
+# Notes with any HTML element that sets a style property
+N where
+  obsidian.notes.HtmlElement { note = N } = E;
+  obsidian.notes.HtmlAttribute { element = E, name = "style" }
 ```
 
 ## How this supports LSP "jump between notes"
@@ -193,16 +225,20 @@ Parsing follows Obsidian's rules for
 
 - Frontmatter is the leading `---` … `---` YAML block; properties are typed as
   Text / List / Number / Checkbox / Date / Date & time.
-- Links and tags inside **fenced code blocks and inline code are ignored**,
-  including code fences nested inside callouts (`> ```…`).
+- Links, tags, HTML and task items inside **fenced code blocks and inline code
+  are ignored**, including code fences nested inside callouts (`> ```…`).
 - Link resolution tries, in order: same-note anchor, source-relative path,
   vault-root path, note name (case-insensitive fallback), then frontmatter
   `aliases`.
+- Inline HTML is matched with a pragmatic tag scanner (not a full HTML parser);
+  scheme/email autolinks (`<https://…>`, `<a@b>`) are not treated as elements.
 
 **Out of scope (for now):** treating frontmatter values as link properties,
-Dataview/Bases queries, and full CommonMark edge cases. Link resolution uses a
-"nearest name" heuristic rather than Obsidian's exact index; ambiguous bare
-names resolve to the shortest path.
+Dataview/Bases queries, footnotes, and full CommonMark edge cases. Link
+resolution uses a "nearest name" heuristic rather than Obsidian's exact index;
+ambiguous bare names resolve to the shortest path. A task item's links/tags are
+attributed by line, so a task that wraps across lines only captures its first
+line.
 
 ## Project layout
 
@@ -212,7 +248,7 @@ src/
   main.rs                  CLI
   vault.rs                 walk, resolve links, drive fact emission
   frontmatter.rs           YAML frontmatter split + property typing
-  markdown.rs              links / tags / headings / blocks (+ code masking)
+  markdown.rs              links / tags / headings / blocks / code / todos / html
   facts.rs                 Glean JSON fact builder (id interning)
   model.rs                 shared types (enum indices kept in sync with schema)
 tests/index_sample.rs      end-to-end test over examples/sample-vault
@@ -222,17 +258,18 @@ examples/sample-vault/     a small vault exercising every feature
 ## Testing
 
 ```sh
-cargo test        # 19 unit tests + 14 end-to-end tests
+cargo test        # 27 unit tests + 18 end-to-end tests
 cargo clippy      # lint-clean
 ```
 
 The unit tests cover frontmatter typing and the Markdown extractor (aliases,
-escaped pipes, angle-bracket autolinks, callout code fences, tag validity, span
-accuracy). The integration tests index `examples/sample-vault` and assert on
-the emitted facts: property types, resolved/unresolved references, anchors,
-link/reference aliases, first-class note aliases, frontmatter presence,
-lower-cased and nested tags, bidirectional backlinks, and that code-masked
-tokens never leak.
+escaped pipes, autolinks, callout code fences, tag validity, span accuracy,
+reference-style links, footnote exclusion, code-block languages, task items,
+HTML attributes). The integration tests index `examples/sample-vault` and
+assert on the emitted facts: property types, resolved/unresolved references,
+anchors, link/reference aliases, first-class note aliases, frontmatter
+presence, lower-cased and nested tags, backlinks, code blocks, task links/tags,
+HTML elements/attributes, and that code-masked tokens never leak.
 
 ## Notes on the JSON format
 

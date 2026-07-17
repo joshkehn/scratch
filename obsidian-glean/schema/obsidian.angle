@@ -281,6 +281,68 @@ predicate Block :
   }
 
 # ===========================================================================
+# Other note content: code blocks, tasks (TODOs), inline HTML
+# ===========================================================================
+
+# A fenced code block. `language` is the info-string language lower-cased
+# (e.g. "php", "bash", "mermaid"), or "" for a fence with no language. `span`
+# covers the whole block including the fences. Query, e.g., notes with a PHP
+# code block: `CodeBlock { note = N, language = "php" }`.
+predicate CodeBlock :
+  {
+    note : Note,
+    language : string,
+    span : ByteSpan,
+  }
+
+# A task-list item ("TODO"), e.g. `- [ ] text` or `- [x] text`. `checked` is
+# true unless the checkbox is blank (`[ ]`). `text` is the task text; `span`
+# covers the whole item line. Notes or tags mentioned inside the task are
+# linked via TodoLink / TodoTag below.
+predicate Todo :
+  {
+    note : Note,
+    checked : bool,
+    text : string,
+    span : ByteSpan,
+  }
+
+# A resolved note/file reference that occurs inside a task item.
+predicate TodoLink :
+  {
+    todo : Todo,
+    target : File,
+  }
+
+# A tag that occurs inside a task item.
+predicate TodoTag :
+  {
+    todo : Todo,
+    tag : Tag,
+  }
+
+# An inline HTML element occurrence (an opening or self-closing tag). `name`
+# is the lower-cased tag name (e.g. "div", "span", "img"); `span` covers the
+# tag. Attributes are attached via HtmlAttribute below.
+predicate HtmlElement :
+  {
+    note : Note,
+    name : string,
+    span : ByteSpan,
+  }
+
+# An attribute on an HTML element. `name` is the lower-cased attribute name
+# (e.g. "style", "class"); `value` is the attribute value, or "" for a
+# valueless attribute. Query, e.g., notes with any element that sets a style:
+# `N where HtmlElement { note = N, span = S }; HtmlAttribute { element = { note = N, span = S }, name = "style" }`.
+predicate HtmlAttribute :
+  {
+    element : HtmlElement,
+    name : string,
+    value : string,
+  }
+
+# ===========================================================================
 # Derived relationships
 # ===========================================================================
 
