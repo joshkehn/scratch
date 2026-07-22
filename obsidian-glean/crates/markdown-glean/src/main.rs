@@ -1,49 +1,44 @@
-//! Command-line entry point for the Obsidian Glean indexer.
+//! CLI for the generic Markdown Glean indexer.
 //!
-//! Usage:
-//!   obsidian-glean-indexer <vault-dir> [-o <out.json>] [--pretty]
-//!
-//! Emits the Glean JSON fact document to stdout (or `-o` file) and a short
-//! summary to stderr.
+//! Usage: markdown-glean-indexer <dir> [-o <out.json>] [--pretty]
 
-use obsidian_glean::index_vault;
+use markdown_glean::{index_corpus, NoDialect};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 struct Args {
-    vault: PathBuf,
+    root: PathBuf,
     output: Option<PathBuf>,
     pretty: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
-    let mut vault: Option<PathBuf> = None;
-    let mut output: Option<PathBuf> = None;
+    let mut root = None;
+    let mut output = None;
     let mut pretty = false;
-
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "-h" | "--help" => return Err(String::new()),
             "--pretty" => pretty = true,
             "-o" | "--output" => {
-                let v = it.next().ok_or("expected a path after -o/--output")?;
-                output = Some(PathBuf::from(v));
+                output = Some(PathBuf::from(
+                    it.next().ok_or("expected a path after -o/--output")?,
+                ));
             }
             other if other.starts_with('-') && other != "-" => {
                 return Err(format!("unknown option: {other}"));
             }
             other => {
-                if vault.is_some() {
+                if root.is_some() {
                     return Err(format!("unexpected extra argument: {other}"));
                 }
-                vault = Some(PathBuf::from(other));
+                root = Some(PathBuf::from(other));
             }
         }
     }
-
     Ok(Args {
-        vault: vault.ok_or("missing <vault-dir> argument")?,
+        root: root.ok_or("missing <dir> argument")?,
         output,
         pretty,
     })
@@ -51,12 +46,10 @@ fn parse_args() -> Result<Args, String> {
 
 fn usage() {
     eprintln!(
-        "obsidian-glean-indexer — emit Glean facts (obsidian.notes) for an Obsidian vault\n\n\
-         USAGE:\n    obsidian-glean-indexer <vault-dir> [-o <out.json>] [--pretty]\n\n\
-         ARGS:\n    <vault-dir>          Path to the Obsidian vault to index\n\n\
+        "markdown-glean-indexer — emit Glean facts (markdown.*) for a Markdown corpus\n\n\
+         USAGE:\n    markdown-glean-indexer <dir> [-o <out.json>] [--pretty]\n\n\
          OPTIONS:\n    -o, --output <file>  Write JSON here instead of stdout\n    \
-         --pretty             Pretty-print the JSON (default: compact)\n    \
-         -h, --help           Show this help"
+         --pretty             Pretty-print the JSON\n    -h, --help           Show this help"
     );
 }
 
@@ -76,15 +69,15 @@ fn main() -> ExitCode {
         }
     };
 
-    if !args.vault.is_dir() {
-        eprintln!("error: {} is not a directory", args.vault.display());
+    if !args.root.is_dir() {
+        eprintln!("error: {} is not a directory", args.root.display());
         return ExitCode::FAILURE;
     }
 
-    let (facts, stats) = match index_vault(&args.vault) {
+    let (facts, stats) = match index_corpus(&args.root, NoDialect::default()) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("error: failed to index vault: {e}");
+            eprintln!("error: failed to index: {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -97,7 +90,7 @@ fn main() -> ExitCode {
     let json = match json {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("error: failed to serialize facts: {e}");
+            eprintln!("error: failed to serialize: {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -112,9 +105,8 @@ fn main() -> ExitCode {
     }
 
     eprintln!(
-        "indexed {} files ({} notes): {} references, {} unresolved links, {} note-tag links",
-        stats.files, stats.notes, stats.references, stats.unresolved, stats.tags
+        "indexed {} files ({} documents): {} headings, {} links, {} code blocks, {} tables, {} tasks",
+        stats.files, stats.documents, stats.headings, stats.links, stats.code_blocks, stats.tables, stats.tasks
     );
-
     ExitCode::SUCCESS
 }

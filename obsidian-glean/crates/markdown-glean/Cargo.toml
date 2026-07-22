@@ -1,0 +1,24 @@
+[package]
+name = "markdown-glean"
+description = "A Glean indexer for generic Markdown (CommonMark + GFM), extensible per dialect"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "markdown-glean-indexer"
+path = "src/main.rs"
+
+[lib]
+name = "markdown_glean"
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+walkdir.workspace = true
+regex.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

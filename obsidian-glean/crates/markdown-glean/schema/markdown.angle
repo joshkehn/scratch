@@ -1,0 +1,227 @@
+# Glean schema for generic Markdown (CommonMark + the GFM superset).
+#
+# This is the dialect-neutral BASE layer: files, Markdown documents,
+# frontmatter, headings, links / images / external URLs, code blocks, inline
+# HTML, task items, tables and footnotes. Everything here is true of any
+# Markdown file (README.md, CONTRIBUTING.md, docs, blog posts, ...).
+#
+# Dialect-specific syntax (Obsidian wikilinks / tags / block ids, MyST roles,
+# etc.) belongs in schemas that `import markdown.1` and attach their facts to
+# `markdown.Document` / `markdown.File`. See ../../obsidian-glean for the
+# Obsidian extension.
+#
+# Enum orderings are part of the JSON wire format (an enum is written as its
+# 0-based index) and MUST match the Rust enums in src/model.rs.
+
+schema markdown.1 {
+
+# ===========================================================================
+# Files & documents
+# ===========================================================================
+
+# Any file in the corpus, keyed by its corpus-relative path (forward slashes).
+predicate File : string
+predicate FileName : { file : File, name : string }
+predicate FileExtension : { file : File, extension : string }
+
+# A File parsed as Markdown (extension .md / .markdown by default).
+predicate Document : File
+
+# A byte range within a file's contents: 0-based `start`, byte `length`.
+type ByteSpan = { start : nat, length : nat }
+
+# ===========================================================================
+# Frontmatter (generic leading metadata block)
+# ===========================================================================
+#
+# A dialect-neutral view of a YAML/TOML/JSON frontmatter block. A dialect such
+# as Obsidian can add a narrower typed view on top (see obsidian.NotePropertyType).
+
+# Generic value type of a frontmatter property.
+type FmType = enum { null_ | boolean | number | string_ | date | datetime | array | object }
+
+# A single frontmatter value. Numbers/dates/datetimes are carried as their
+# textual form (lossless). An `array` property emits one value per element; a
+# nested object is carried as its compact JSON text under `object`.
+type FmValue =
+  {
+    null_ : {} |
+    boolean : bool |
+    number : string |
+    string_ : string |
+    date : string |
+    datetime : string |
+    object : string
+  }
+
+# Whether the document has a frontmatter block at all.
+predicate FrontmatterPresent : { doc : Document, present : bool }
+# A frontmatter property name is present ("has key").
+predicate FrontmatterKey : { doc : Document, key : string }
+# A property's top-level type ("has key of type").
+predicate FrontmatterKeyType : { doc : Document, key : string, type_ : FmType }
+# A property's value(s) ("has key with value"); one fact per array element.
+predicate FrontmatterKeyValue : { doc : Document, key : string, value : FmValue }
+
+# ===========================================================================
+# Headings (ATX and Setext)
+# ===========================================================================
+
+type HeadingKind = enum { atx | setext }
+
+# A heading. `level` is 1-6 (Setext is 1-2); `slug` is a GitHub-style anchor
+# slug so that a link fragment `#slug` can resolve to it.
+predicate Heading :
+  {
+    doc : Document,
+    text : string,
+    level : nat,
+    slug : string,
+    kind : HeadingKind,
+    span : ByteSpan,
+  }
+
+# ===========================================================================
+# Links, images and external URLs
+# ===========================================================================
+
+# The syntactic form of a link. `image` is orthogonal (an `![...]` image can be
+# inline or any reference form); autolinks are never images.
+type LinkKind = enum { inline | reference | collapsed | shortcut | autolink }
+
+# An internal link/image resolved to a File in the corpus. `text` is the link
+# display text; `fragment` is the `#...` part of the destination (a heading
+# slug within the target).
+predicate Reference :
+  {
+    source : Document,
+    target : File,
+    kind : LinkKind,
+    image : bool,
+    text : string,
+    fragment : maybe string,
+    span : ByteSpan,
+  }
+
+# A link/image/autolink whose destination is an external URL. `scheme` is the
+# URL scheme (e.g. "https", "mailto").
+predicate ExternalLink :
+  {
+    source : Document,
+    url : string,
+    scheme : string,
+    kind : LinkKind,
+    image : bool,
+    text : string,
+    span : ByteSpan,
+  }
+
+# An internal-looking link that did not resolve to any corpus File (dangling).
+predicate UnresolvedReference :
+  {
+    source : Document,
+    target : string,
+    kind : LinkKind,
+    image : bool,
+    text : string,
+    span : ByteSpan,
+  }
+
+# A link reference definition `[label]: destination "title"`. `label` is the
+# CommonMark-normalized label that reference/collapsed/shortcut links resolve
+# against.
+predicate LinkRefDefinition :
+  {
+    doc : Document,
+    label : string,
+    destination : string,
+    span : ByteSpan,
+  }
+
+# ===========================================================================
+# Code blocks
+# ===========================================================================
+
+# A fenced code block. `language` is the first info-string word lower-cased
+# ("" if none); `info` is the full info string as written; `span` covers the
+# whole block including fences.
+predicate CodeBlock :
+  {
+    doc : Document,
+    language : string,
+    info : string,
+    span : ByteSpan,
+  }
+
+# ===========================================================================
+# Inline HTML
+# ===========================================================================
+
+predicate HtmlElement : { doc : Document, name : string, span : ByteSpan }
+predicate HtmlAttribute : { element : HtmlElement, name : string, value : string }
+
+# ===========================================================================
+# Task list items (GFM)
+# ===========================================================================
+
+# A task-list item `- [ ] text` / `- [x] text`. `checked` is false only for a
+# blank `[ ]`; `marker` is the raw character inside the brackets.
+predicate TaskItem :
+  {
+    doc : Document,
+    checked : bool,
+    marker : string,
+    text : string,
+    span : ByteSpan,
+  }
+
+# A resolved internal link occurring inside a task item.
+predicate TaskItemLink : { task : TaskItem, target : File }
+
+# ===========================================================================
+# Tables (GFM)
+# ===========================================================================
+
+type ColumnAlign = enum { none_ | left | center | right }
+
+# A GFM pipe table. `columns` is the number of columns (from the delimiter
+# row); `rows` is the number of body rows (excluding header and delimiter).
+predicate Table : { doc : Document, columns : nat, rows : nat, span : ByteSpan }
+predicate TableColumn :
+  {
+    table : Table,
+    index : nat,
+    align : ColumnAlign,
+    header : string,
+  }
+
+# ===========================================================================
+# Footnotes
+# ===========================================================================
+
+predicate FootnoteDefinition : { doc : Document, label : string, span : ByteSpan }
+predicate FootnoteReference : { doc : Document, label : string, span : ByteSpan }
+
+# A footnote reference paired with its definition in the same document.
+predicate FootnoteResolved :
+  {
+    reference : FootnoteReference,
+    definition : FootnoteDefinition,
+  }
+  { reference = R, definition = D } where
+    FootnoteReference { doc = Doc, label = L } = R;
+    FootnoteDefinition { doc = Doc, label = L } = D
+
+# ===========================================================================
+# Derived: backlinks
+# ===========================================================================
+
+# For a target File, the documents that link to it (reverse of Reference).
+predicate Backlink :
+  {
+    target : File,
+    source : Document,
+  }
+  { target = T, source = S } where Reference { source = S, target = T }
+
+}

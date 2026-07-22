@@ -1,0 +1,22 @@
+[package]
+name = "obsidian-glean"
+description = "A Glean indexer for Obsidian vaults, extending markdown-glean"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "obsidian-glean-indexer"
+path = "src/main.rs"
+
+[lib]
+name = "obsidian_glean"
+path = "src/lib.rs"
+
+[dependencies]
+markdown-glean.workspace = true
+serde_json.workspace = true
+regex.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

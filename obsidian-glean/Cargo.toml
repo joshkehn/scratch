@@ -1,27 +1,19 @@
-[package]
-name = "obsidian-glean"
-version = "0.1.0"
+[workspace]
+resolver = "2"
+members = ["crates/markdown-glean", "crates/obsidian-glean"]
+
+[workspace.package]
+version = "0.2.0"
 edition = "2021"
-description = "A Glean indexer for Obsidian vaults: emits obsidian.notes facts as JSON"
 license = "MIT"
 
-[[bin]]
-name = "obsidian-glean-indexer"
-path = "src/main.rs"
-
-[lib]
-name = "obsidian_glean"
-path = "src/lib.rs"
-
-[dependencies]
+[workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 walkdir = "2"
 regex = "1"
-
-[dev-dependencies]
-serde_json = "1"
+markdown-glean = { path = "crates/markdown-glean" }
 
 [profile.release]
 opt-level = 3

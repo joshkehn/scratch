@@ -1,0 +1,157 @@
+# Glean schema for Obsidian vaults: the Obsidian dialect extension of the
+# generic `markdown.1` schema.
+#
+# This schema `import`s markdown.1 and attaches Obsidian-specific facts to
+# `markdown.Document` / `markdown.File`: note titles and aliases, wikilinks and
+# embeds (resolved by note name, not just path), tags with a nesting hierarchy,
+# block ids, and an Obsidian-typed view of frontmatter properties.
+#
+# The obsidian-glean indexer emits BOTH `markdown.*` facts (via the base) AND
+# these `obsidian.*` facts for a vault, so load markdown.angle and obsidian.angle
+# together. Enum orderings are the JSON wire format; keep them in sync with
+# src/model.rs.
+
+schema obsidian.1 {
+
+import markdown.1
+
+# ===========================================================================
+# Notes
+# ===========================================================================
+
+# A note: a Markdown Document living in an Obsidian vault.
+predicate Note : markdown.Document
+
+# The note's names, both of which a wikilink may use: the bare `title` ("Me",
+# for [[Me]]) and the vault-path `absolute` title ("About/Me", for [[About/Me]]).
+predicate NoteTitle :
+  {
+    note : Note,
+    title : string,
+    absolute : string,
+  }
+
+# A frontmatter alias of a note (an entry of the `aliases` property) — an
+# alternate name a wikilink can resolve to.
+predicate NoteAlias :
+  {
+    note : Note,
+    alias : string,
+  }
+
+# ===========================================================================
+# Wikilinks and embeds
+# ===========================================================================
+
+type WikiKind = enum { wikilink | embed }
+
+# A within-file anchor: whole file, a heading, or a block id.
+type Anchor =
+  {
+    none_ : {} |
+    heading : string |
+    block : string
+  }
+
+# A resolved wikilink/embed to a File (note or attachment), resolved by note
+# name / alias / path. `alias` is the `[[target|alias]]` display text.
+predicate WikiReference :
+  {
+    source : Note,
+    target : markdown.File,
+    kind : WikiKind,
+    anchor : Anchor,
+    alias : maybe string,
+    span : markdown.ByteSpan,
+  }
+
+# A wikilink/embed whose target could not be resolved to a vault file.
+predicate UnresolvedWikiReference :
+  {
+    source : Note,
+    target : string,
+    kind : WikiKind,
+    anchor : Anchor,
+    alias : maybe string,
+    span : markdown.ByteSpan,
+  }
+
+# An alias observed in a wikilink, keyed by the raw written target, so it also
+# captures aliases for notes that do not exist yet ([[Does not exist|missing]]).
+predicate LinkAlias :
+  {
+    target : string,
+    alias : string,
+  }
+
+# ===========================================================================
+# Tags
+# ===========================================================================
+
+# A tag, lower-cased, without the leading '#'. Nested tags keep their slashes;
+# every ancestor prefix is also interned (see TagParent).
+predicate Tag : string
+
+# A note carries a tag (inline `#tag` or the `tags` frontmatter property).
+predicate NoteTag :
+  {
+    note : Note,
+    tag : Tag,
+  }
+
+# The immediate parent of a nested tag ("2025/12/12" -> "2025/12").
+predicate TagParent :
+  {
+    tag : Tag,
+    parent : Tag,
+  }
+
+# A tag occurring inside a task item (attaches an Obsidian tag to a base task).
+predicate TaskItemTag :
+  {
+    task : markdown.TaskItem,
+    tag : Tag,
+  }
+
+# ===========================================================================
+# Block ids
+# ===========================================================================
+
+# A block identifier defined in a note (a trailing `^block-id`), so a link
+# `[[Note#^block-id]]` can resolve to a jump location.
+predicate Block :
+  {
+    note : Note,
+    id : string,
+    span : markdown.ByteSpan,
+  }
+
+# ===========================================================================
+# Obsidian-typed frontmatter
+# ===========================================================================
+
+# Obsidian's UI property types, a narrowing of markdown.FmType.
+type PropertyType = enum { text | list | number | checkbox | date | datetime }
+
+# The Obsidian property type of a frontmatter key (refines markdown.FrontmatterKeyType).
+predicate NotePropertyType :
+  {
+    note : Note,
+    key : string,
+    type_ : PropertyType,
+  }
+
+# ===========================================================================
+# Derived: wikilink backlinks
+# ===========================================================================
+
+# For a target File, the notes that link to it via a wikilink/embed. Combine
+# with markdown.Backlink for backlinks via Markdown-style links.
+predicate Backlink :
+  {
+    target : markdown.File,
+    source : Note,
+  }
+  { target = T, source = S } where WikiReference { source = S, target = T }
+
+}
