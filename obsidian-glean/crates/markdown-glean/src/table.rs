@@ -28,9 +28,15 @@ pub fn try_table(lines: &[SrcLine], i: usize, base: usize) -> Option<TableMatch>
     if delim_cells.is_empty() || !delim_cells.iter().all(|c| delimiter_cell_re().is_match(c)) {
         return None;
     }
+    // GFM requires the header row to have the same number of cells as the
+    // delimiter row; otherwise it is not a table (and the "header" may be a
+    // Setext heading or a paragraph, handled by the caller instead).
+    let header_cells = split_row(header);
+    if header_cells.len() != delim_cells.len() {
+        return None;
+    }
 
     let aligns: Vec<ColumnAlign> = delim_cells.iter().map(|c| align_of(c)).collect();
-    let header_cells = split_row(header);
     let columns: Vec<TableColumn> = aligns
         .iter()
         .enumerate()

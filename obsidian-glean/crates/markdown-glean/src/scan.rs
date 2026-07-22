@@ -159,8 +159,8 @@ pub fn scan(body: &str, base: usize, reserved: &[(usize, usize)]) -> MarkdownCon
 
     let (links, link_defs) = scan_links(body, base, &masks, reserved);
     let html = scan_html(body, base, &masks, reserved);
-    let (headings, tasks, tables) = scan_lines(body, base, &masks);
-    let (footnote_defs, footnote_refs) = scan_footnotes(body, base, &masks);
+    let (headings, tasks, tables) = scan_lines(body, base, &masks, reserved);
+    let (footnote_defs, footnote_refs) = scan_footnotes(body, base, &masks, reserved);
 
     MarkdownContent {
         headings,
@@ -451,6 +451,7 @@ fn scan_lines(
     body: &str,
     base: usize,
     masks: &CodeMasks,
+    reserved: &[(usize, usize)],
 ) -> (Vec<Heading>, Vec<crate::model::TaskItem>, Vec<Table>) {
     let lines = lines(body);
     let mut headings = Vec::new();
@@ -461,7 +462,10 @@ fn scan_lines(
     let mut i = 0;
     while i < lines.len() {
         let line = &lines[i];
-        if masks.contains(line.start) || line.start < consumed_until {
+        if masks.contains(line.start)
+            || in_ranges(line.start, reserved)
+            || line.start < consumed_until
+        {
             i += 1;
             continue;
         }
@@ -531,18 +535,24 @@ fn scan_lines(
 }
 
 /// A line that can be the text of a Setext heading: non-blank and not itself a
-/// block starter (heading, list, quote, fence, thematic break).
+/// block starter (heading, list, quote, fence, thematic break, HTML block, or
+/// a link-reference / footnote definition — which the reference parser strips
+/// before paragraph handling in CommonMark).
 fn is_paragraph(text: &str) -> bool {
     let t = text.trim();
     if t.is_empty() {
         return false;
     }
     let first = t.as_bytes()[0];
-    // Exclude obvious block starters (a leading list marker `-` is covered here).
+    // Exclude obvious block starters (a leading list marker `-` is covered here)
+    // and HTML-block / definition lines.
     if matches!(
         first,
-        b'#' | b'>' | b'-' | b'*' | b'+' | b'=' | b'`' | b'~' | b'|'
+        b'#' | b'>' | b'-' | b'*' | b'+' | b'=' | b'`' | b'~' | b'|' | b'<'
     ) {
+        return false;
+    }
+    if linkdef_re().is_match(text) || footnote_def_re().is_match(text) {
         return false;
     }
     // An ordered-list item like "1. text" is not paragraph text.
@@ -574,9 +584,16 @@ pub fn slugify(text: &str) -> String {
 // Footnotes
 // ---------------------------------------------------------------------------
 
-fn scan_footnotes(body: &str, base: usize, masks: &CodeMasks) -> (Vec<Footnote>, Vec<Footnote>) {
+fn scan_footnotes(
+    body: &str,
+    base: usize,
+    masks: &CodeMasks,
+    reserved: &[(usize, usize)],
+) -> (Vec<Footnote>, Vec<Footnote>) {
     let mut defs = Vec::new();
-    let mut def_ranges = Vec::new();
+    // Suppress only the leading `[^label]:` token of a definition line, so a
+    // footnote reference elsewhere on that line is still captured.
+    let mut def_tokens = Vec::new();
     for line in lines(body) {
         if masks.contains(line.start) {
             continue;
@@ -586,14 +603,17 @@ fn scan_footnotes(body: &str, base: usize, masks: &CodeMasks) -> (Vec<Footnote>,
                 label: caps[1].trim().to_string(),
                 span: Span::new(base + line.start, line.text.len()),
             });
-            def_ranges.push((line.start, line.end));
+            def_tokens.push((line.start, line.start + caps.get(0).unwrap().end()));
         }
     }
 
     let mut refs = Vec::new();
     for caps in footnote_ref_re().captures_iter(body) {
         let m = caps.get(0).unwrap();
-        if masks.contains(m.start()) || in_ranges(m.start(), &def_ranges) {
+        if masks.contains(m.start())
+            || in_ranges(m.start(), &def_tokens)
+            || in_ranges(m.start(), reserved)
+        {
             continue;
         }
         // A `[^x]` immediately followed by ':' is a definition, not a reference.
@@ -722,47 +742,42 @@ fn fenced_blocks(body: &str) -> Vec<FencedBlock> {
     blocks
 }
 
+/// Byte ranges of inline code spans, scanned over the whole body so that
+/// multi-line spans (valid in CommonMark) are masked. A span is a run of `n`
+/// backticks, content, then a matching run of exactly `n` backticks; spans do
+/// not start inside a fenced block.
 fn inline_code_ranges(body: &str, fenced: &[(usize, usize)]) -> Vec<(usize, usize)> {
+    let bytes = body.as_bytes();
     let mut ranges = Vec::new();
-    let mut offset = 0usize;
-    for line in body.split_inclusive('\n') {
-        let line_start = offset;
-        offset += line.len();
-        if in_ranges(line_start, fenced) {
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'`' || in_ranges(i, fenced) {
+            i += 1;
             continue;
         }
-        let bytes = line.as_bytes();
-        let mut i = 0;
-        while i < bytes.len() {
-            if bytes[i] == b'`' {
-                let open = i;
-                let n = bytes[i..].iter().take_while(|&&b| b == b'`').count();
-                i += n;
-                let mut j = i;
-                let mut closed = None;
-                while j < bytes.len() {
-                    if bytes[j] == b'`' {
-                        let run = bytes[j..].iter().take_while(|&&b| b == b'`').count();
-                        if run == n {
-                            closed = Some(j + run);
-                            break;
-                        }
-                        j += run;
-                    } else {
-                        j += 1;
-                    }
+        let open = i;
+        let n = bytes[i..].iter().take_while(|&&b| b == b'`').count();
+        i += n;
+        // Find a closing run of exactly `n` backticks (may cross newlines).
+        let mut j = i;
+        let mut closed = None;
+        while j < bytes.len() {
+            if bytes[j] == b'`' {
+                let run = bytes[j..].iter().take_while(|&&b| b == b'`').count();
+                if run == n {
+                    closed = Some(j + run);
+                    break;
                 }
-                match closed {
-                    Some(end) => {
-                        ranges.push((line_start + open, line_start + end));
-                        i = end;
-                    }
-                    None => break,
-                }
+                j += run;
             } else {
-                i += 1;
+                j += 1;
             }
         }
+        if let Some(end) = closed {
+            ranges.push((open, end));
+            i = end;
+        }
+        // Unclosed run: the backticks are literal; `i` is already past them.
     }
     ranges
 }
@@ -892,5 +907,52 @@ mod tests {
             .links
             .iter()
             .any(|l| l.kind == LinkKind::Autolink && l.dest == "a@b.com"));
+    }
+
+    // --- regression tests for reviewed defects ---
+
+    #[test]
+    fn mismatched_table_is_rejected_and_setext_survives() {
+        // Header (2 cells) vs delimiter (1 cell): not a GFM table.
+        assert!(c("| a | b |\n| --- |\nx\n").tables.is_empty());
+        // A pipe-containing paragraph + dash underline is a Setext heading,
+        // not a phantom table.
+        let m = c("a | b\n-----\n");
+        assert!(m.tables.is_empty());
+        assert!(m
+            .headings
+            .iter()
+            .any(|h| h.text == "a | b" && h.kind == HeadingKind::Setext));
+    }
+
+    #[test]
+    fn multiline_inline_code_is_masked() {
+        // A code span crossing a line: the interior link must not be extracted.
+        let m = c("start `x\n[a](b)` end\n");
+        assert!(m.links.is_empty());
+    }
+
+    #[test]
+    fn link_ref_definition_is_not_a_setext_heading() {
+        let m = c("[foo]: /url\n===\n");
+        assert!(!m.headings.iter().any(|h| h.kind == HeadingKind::Setext));
+        assert_eq!(m.link_defs.len(), 1);
+    }
+
+    #[test]
+    fn footnote_reference_on_definition_line_is_captured() {
+        let m = c("[^1]: see [^2] for details.\n");
+        let labels: Vec<_> = m.footnote_refs.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(labels, vec!["2"]); // the def's own [^1] is suppressed, [^2] kept
+    }
+
+    #[test]
+    fn reserved_ranges_skip_heading_lines() {
+        // A dialect owning the whole first line stops the base emitting a
+        // heading from it.
+        let body = "# Owned\n\n# Real\n";
+        let m = scan(body, 0, &[(0, 7)]);
+        let texts: Vec<_> = m.headings.iter().map(|h| h.text.as_str()).collect();
+        assert_eq!(texts, vec!["Real"]);
     }
 }

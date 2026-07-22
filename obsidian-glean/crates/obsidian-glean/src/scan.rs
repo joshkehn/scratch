@@ -15,7 +15,17 @@ fn wikilink_re() -> &'static Regex {
 
 fn tag_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?:^|[\s>(])(#[\p{L}\p{N}_/-]+)").unwrap())
+    // Preceded by start-of-text, whitespace, or `>` (callout). `(` is excluded
+    // so a Markdown link fragment `](#frag)` is not read as a tag.
+    RE.get_or_init(|| Regex::new(r"(?:^|[\s>])(#[\p{L}\p{N}_/-]+)").unwrap())
+}
+
+/// True if a line is an ATX heading (`#`..`######` then a space), so a trailing
+/// `^id` on it is part of the heading, not a block definition.
+fn is_atx_heading(text: &str) -> bool {
+    let t = text.trim_start();
+    let hashes = t.bytes().take_while(|&b| b == b'#').count();
+    (1..=6).contains(&hashes) && matches!(t.as_bytes().get(hashes), Some(b' ') | Some(b'\t'))
 }
 
 fn block_re() -> &'static Regex {
@@ -76,7 +86,7 @@ pub fn scan(body: &str, base: usize) -> (ObsidianContent, Vec<(usize, usize)>) {
 
     let mut blocks = Vec::new();
     for line in lines(body) {
-        if masks.contains(line.start) {
+        if masks.contains(line.start) || is_atx_heading(line.text) {
             continue;
         }
         if let Some(caps) = block_re().captures(line.text) {
@@ -199,5 +209,19 @@ mod tests {
         assert_eq!(normalize_tag("TAG").as_deref(), Some("tag"));
         assert_eq!(normalize_tag("Foo/").as_deref(), Some("foo"));
         assert_eq!(normalize_tag("/"), None);
+    }
+
+    #[test]
+    fn markdown_link_fragment_is_not_a_tag() {
+        // `[text](#frag)` — the `#frag` is a link fragment, not a tag.
+        let (c, _) = scan("See the [Goals section](#goals) here.", 0);
+        assert!(c.tags.is_empty());
+    }
+
+    #[test]
+    fn block_id_on_heading_line_is_skipped() {
+        let (c, _) = scan("## A heading ^bar\n\nA paragraph. ^baz\n", 0);
+        let ids: Vec<_> = c.blocks.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(ids, vec!["baz"]); // ^bar on the heading line is not a block
     }
 }
