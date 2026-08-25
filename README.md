@@ -18,16 +18,88 @@ Two zones showing near enough the same time land on the same spot on the dial,
 which is the truth — the arrows stay put and the letters step inwards so both
 stay readable.
 
-## Building
-
-Needs the [Connect IQ SDK](https://developer.garmin.com/connect-iq/sdk/).
-
-```sh
-monkeyc -f monkey.jungle -o bin/zones.prg -y developer_key.der -d fenix7
-```
+## Building and testing
 
 51 round devices are supported, from 260×260 MIP watches up to 454×454 AMOLED.
 Each build carries only the bitmap fonts baked for its own screen size.
+
+### Setup, once
+
+1. Install the [Connect IQ SDK
+   Manager](https://developer.garmin.com/connect-iq/sdk/), and through it an SDK
+   and the device descriptions for whatever you own.
+2. Install the **Monkey C** extension for VS Code (Garmin publishes it), which
+   drives the compiler, simulator and debugger.
+3. Make a developer key. `Monkey C: Generate a Developer Key` from the command
+   palette, or:
+
+   ```sh
+   openssl genrsa -out developer_key.pem 4096
+   openssl pkcs8 -topk8 -inform PEM -outform DER \
+       -in developer_key.pem -out developer_key.der -nocrypt
+   ```
+
+Put `bin/` and `developer_key.*` out of the repo's way — `.gitignore` already
+covers `bin/`.
+
+### Simulator
+
+```sh
+monkeyc -f monkey.jungle -o bin/zones.prg -y developer_key.der -d venu2 -w
+connectiq                        # start the simulator
+monkeydo bin/zones.prg venu2     # load the face into it
+```
+
+`-w` turns on warnings; leave it on. In VS Code, F5 does the same thing and asks
+which device.
+
+**Settings** live in the simulator under *File ▸ Edit Persistent Storage ▸ Edit
+Application.Properties data*. Something like this exercises the whole face —
+four zones spread around the dial, two of them in the dark:
+
+| key | value |
+| --- | --- |
+| `homePrefix` / `homePosition` | `N` / `40.71,-74.01` |
+| `zone1Prefix` / `Offset` / `Position` | `L` / `1` / `51.51,-0.13` |
+| `zone2Prefix` / `Offset` / `Position` | `T` / `9` / `35.68,139.65` |
+| `zone3Prefix` / `Offset` / `Position` | `S` / `-8` / `37.77,-122.42` |
+
+Worth looking at specifically:
+
+* **One device per screen size**, because each loads different bitmap fonts:
+  `fenix7` (260), `fenix7x` (280), `vivoactive5` (390), `venu2` (416),
+  `venu3` (454).
+* **Low power mode.** The seconds under the time must disappear, and on an
+  AMOLED device the palette should dim and the whole face shift a couple of
+  pixels each minute.
+* **Colliding markers.** Give two zones offsets 12 hours apart — they read the
+  same time on a 12 hour dial, so their arrows land on the same spot and the
+  letters should step inwards rather than overlap.
+* **Peak memory**, in the simulator's memory view. Watch faces have a tight
+  budget and this one carries bitmap fonts.
+
+### On the watch
+
+Build for the exact device, then sideload over USB:
+
+```sh
+monkeyc -f monkey.jungle -o bin/zones.prg -y developer_key.der -d fenix7 -r
+```
+
+`Monkey C: Build for Device` does the same from VS Code. Copy `zones.prg` into
+`GARMIN/APPS/` on the watch's mass storage, **eject properly** so the write
+flushes, then unplug. The face appears in the watch's own watch-face list.
+
+One wrinkle: **settings for a sideloaded face often cannot be edited from the
+phone.** Garmin Connect only reliably exposes settings for apps installed
+through the store. Two ways round it while developing:
+
+* Edit the defaults in `resources/settings/properties.xml` and rebuild. They
+  apply on a fresh install, so the face comes up already configured — much the
+  faster loop.
+* Or upload it to the Connect IQ store as a private/beta app (`monkeyc -e -o
+  bin/zones.iq …` builds the store bundle) and install from there, which gets
+  you real settings.
 
 ## Settings
 
