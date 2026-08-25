@@ -73,34 +73,75 @@ minute the rest of the time, so the cost is in what each redraw does.
 
 ## The typeface
 
-The face is designed for [Innovator
-Grotesk](https://yeptype.com/fonts/innovator-grotesk) (Yep! Type Foundry). It is
-a commercial typeface, so it is **not** bundled here — the fonts checked in are
-built from [Instrument Sans](https://github.com/Instrument/instrument-sans)
-(SIL Open Font License, see `tools/fallback-font/`) so that the project builds
-as it stands.
+The face ships with [Source Code
+Pro](https://github.com/adobe-fonts/source-code-pro) (SIL Open Font License, see
+`tools/fallback-font/`) so that it builds and runs as it stands.
 
-With a licence in hand:
+It is designed for [Innovator
+Grotesk](https://yeptype.com/fonts/innovator-grotesk) (Yep! Type Foundry), which
+is commercial and so is not in this repo. Swapping it in is one command —
+see below.
+
+### Generating the glyphs
+
+Connect IQ cannot load TTF or OTF at runtime. Fonts have to be baked into
+[BMFont](https://www.angelcode.com/products/bmfont/) bitmaps: a `.fnt` metrics
+file plus a `.png` glyph sheet, declared in a `fonts.xml`. `tools/make_fonts.py`
+does the whole job — it rasterises the glyphs, packs the sheet, writes the
+metrics and emits the resource XML, for all five screen sizes.
+
+**1. Find the weights you want.** Innovator Grotesk is a variable font, so name
+the instance rather than picking a separate file:
+
+```sh
+python3 tools/make_fonts.py --font ~/fonts/InnovatorGrotesk.ttf --list-variations
+```
+
+**2. Generate.** Two roles: `time` is the big clock, `zone` is everything
+secondary. A heavier weight for the time reads better at a glance; keep the
+secondary one lighter so the small text at 19px does not fill in.
 
 ```sh
 python3 tools/make_fonts.py \
-    --font ~/fonts/InnovatorGrotesk-Regular.ttf \
-    --time-font ~/fonts/InnovatorGrotesk-Bold.ttf
+    --font          ~/fonts/InnovatorGrotesk.ttf --variation      Regular \
+    --time-font     ~/fonts/InnovatorGrotesk.ttf --time-variation Bold
 ```
 
-For the variable font, name the instance you want with `--variation Medium`
-(and `--time-variation Bold`).
+With static instances instead, just point at the two files and drop
+`--variation`. `--time-font` defaults to `--font` if you only want one weight.
 
-Connect IQ cannot use TTF or OTF directly; fonts have to be baked into
-[BMFont](https://www.angelcode.com/products/bmfont/) bitmaps, which is what this
-does. It picks the largest glyphs whose longest string still fits inside the
-round display, so a wider or narrower typeface than Instrument Sans re-sizes to
-fit rather than overflowing. It prints what it chose:
+**3. Read the fit report.** Glyph sizes are not fixed — the script picks the
+largest that still fits inside the round display, so a narrower typeface comes
+out *bigger* rather than overflowing. It prints what it chose:
 
 ```
-416 time  cap=73px line=73px  '88:88'=282px (fits 284px)  sheet=549x73
-416 zone  cap=20px line=20px  'W 88:88'=108px (fits 110px)  sheet=594x19
+416 time  cap=70px line=70px  '88:88'=277px (fits 285px)  sheet=539x70
+416 zone  cap=19px line=23px  'W 88:88'=105px (fits 110px)  sheet=549x23
 ```
+
+`cap` is the digit height in pixels, and `fits` is the width available at that
+row on a round screen. If `cap` comes out smaller than you like, the typeface is
+wide for its height; `--tracking 0.04` takes more air out between glyphs, and
+`--colon-max` caps how much width the colon may take (0.55 of a digit by
+default, which mostly matters for monospaced faces like the bundled one).
+
+**4. Check it.**
+
+```sh
+python3 tools/check.py
+python3 tools/preview.py --size 416 --out preview.png
+```
+
+The preview parses the same `.fnt` files the watch loads, so it shows the real
+glyphs at the real sizes.
+
+Output lands in `resources-260/fonts/` … `resources-454/fonts/` and is meant to
+be committed — the build needs it. That means the generated bitmaps carry your
+licensed glyphs, so check what your licence says about embedding before pushing
+them anywhere public.
+
+Only the characters the face can draw are baked in: digits, a colon, a space and
+A–Z for the zone letters. That keeps the resources to about 24 KB per device.
 
 ## Checks
 

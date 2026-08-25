@@ -61,7 +61,7 @@ class ZonesView extends WatchUi.WatchFace {
     private var _cx as Number = 0;
     private var _cy as Number = 0;
     private var _radius as Float = 0.0;
-    private var _zoneHeight as Number = 0;
+    private var _zoneAscent as Number = 0;
     private var _prefixGap as Number = 0;
     private var _columnGap as Number = 0;
     private var _yAbove as Number = 0;
@@ -104,15 +104,17 @@ class ZonesView extends WatchUi.WatchFace {
         _timeFont = WatchUi.loadResource(Rez.Fonts.TimeFont) as FontResource;
         _zoneFont = WatchUi.loadResource(Rez.Fonts.ZoneFont) as FontResource;
 
-        // The fonts are generated with a line box that hugs the digits, so
-        // half the font height is the distance from a row's centre to its top.
-        var timeHeight = dc.getFontHeight(_timeFont);
-        _zoneHeight = dc.getFontHeight(_zoneFont);
+        // Centre on the ascent, not the full font height: the line box also
+        // reserves room below the baseline for the one letter that descends
+        // (Q), and nothing this face draws would sit straight if that room
+        // were counted. The ascent is the cap box the digits actually fill.
+        var timeAscent = dc.getFontAscent(_timeFont);
+        _zoneAscent = dc.getFontAscent(_zoneFont);
 
-        _yAbove = (ROW_ABOVE * height - _zoneHeight / 2).toNumber();
-        _yTime = (TIME_ROW * height - timeHeight / 2).toNumber();
-        _ySeconds = (SEC_ROW * height - _zoneHeight / 2).toNumber();
-        _yBelow = (ROW_BELOW * height - _zoneHeight / 2).toNumber();
+        _yAbove = (ROW_ABOVE * height - _zoneAscent / 2).toNumber();
+        _yTime = (TIME_ROW * height - timeAscent / 2).toNumber();
+        _ySeconds = (SEC_ROW * height - _zoneAscent / 2).toNumber();
+        _yBelow = (ROW_BELOW * height - _zoneAscent / 2).toNumber();
         _prefixGap = (PREFIX_GAP * width).toNumber();
         _columnGap = (COL_GAP * width).toNumber();
 
@@ -241,9 +243,9 @@ class ZonesView extends WatchUi.WatchFace {
             arrow[2][0] = (baseX - half * cos).toNumber();
             arrow[2][1] = (baseY - half * sin).toNumber();
 
-            var charR = CHAR_R * _radius - ring * (_zoneHeight + 2);
+            var charR = CHAR_R * _radius - ring * (_zoneAscent + 2);
             _markX[i] = (_cx + charR * sin + offsetX).toNumber();
-            _markY[i] = (_cy - charR * cos - _zoneHeight / 2 + offsetY).toNumber();
+            _markY[i] = (_cy - charR * cos - _zoneAscent / 2 + offsetY).toNumber();
         }
     }
 

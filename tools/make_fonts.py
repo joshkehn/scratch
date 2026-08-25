@@ -18,7 +18,8 @@ Usage
 
 Innovator Grotesk is a commercial typeface from Yep! Type Foundry
 (https://yeptype.com/fonts/innovator-grotesk) and is therefore not bundled
-here.  Buy a licence, drop the files anywhere, and point --font at them.
+here.  Point --font at your own copy; the fonts checked in are built from the
+bundled Source Code Pro so that the project compiles as it stands.
 """
 
 import argparse
@@ -106,8 +107,8 @@ def render_glyphs(face, chars):
     return glyphs
 
 
-def apply_spacing(glyphs, tracking):
-    """Give the digits a common advance and apply tracking.
+def apply_spacing(glyphs, tracking, colon_max):
+    """Give the digits a common advance, cap the colon, and apply tracking.
 
     Tabular digits keep the clock from twitching horizontally as the minute
     rolls over, which also means the layout never has to be recomputed.
@@ -118,6 +119,19 @@ def apply_spacing(glyphs, tracking):
         for d in present:
             glyphs[d]["xoff"] += (tab - glyphs[d]["adv"]) / 2.0
             glyphs[d]["adv"] = tab
+
+        # A colon is two dots, but a monospaced one is handed a whole digit's
+        # width to hold them. Across "88:88" that is the largest single piece
+        # of wasted space, and it comes straight off the size of the clock.
+        # Cap rather than set, so a proportional face -- which already draws a
+        # narrow colon -- is left alone.
+        if ":" in glyphs and colon_max:
+            limit = tab * colon_max
+            colon = glyphs[":"]
+            if colon["adv"] > limit:
+                colon["xoff"] += (limit - colon["adv"]) / 2.0
+                colon["adv"] = limit
+
     for g in glyphs.values():
         g["adv"] = max(1.0, g["adv"] + tracking)
 
@@ -130,7 +144,7 @@ def text_width(glyphs, text):
     return sum(int(round(glyphs[c]["adv"])) for c in text)
 
 
-def px_for_cap(path, variation, chars, target_cap, tracking_frac):
+def px_for_cap(path, variation, chars, target_cap, tracking_frac, colon_max):
     """Find the pixel size whose digit cap height is `target_cap`."""
     lo, hi = 4, max(16, target_cap * 4)
     best = None
@@ -149,14 +163,15 @@ def px_for_cap(path, variation, chars, target_cap, tracking_frac):
     if best is None:
         return None
     px, glyphs = best
-    apply_spacing(glyphs, -tracking_frac * target_cap)
+    apply_spacing(glyphs, -tracking_frac * target_cap, colon_max)
     return px, glyphs
 
 
-def build_role(path, variation, role, chars, probe, budget, max_cap, tracking_frac):
+def build_role(path, variation, role, chars, probe, budget, max_cap, tracking_frac,
+               colon_max):
     """Pick the largest cap height whose probe string still fits."""
     for cap in range(max_cap, 5, -1):
-        found = px_for_cap(path, variation, chars, cap, tracking_frac)
+        found = px_for_cap(path, variation, chars, cap, tracking_frac, colon_max)
         if found is None:
             continue
         px, glyphs = found
@@ -245,14 +260,29 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     fallback = os.path.join(REPO, "tools", "fallback-font")
-    ap.add_argument("--font", default=os.path.join(fallback, "InstrumentSans-Regular.ttf"),
+    ap.add_argument("--font", default=os.path.join(fallback, "SourceCodePro-Regular.ttf"),
                     help="typeface for the sub-displays, seconds and bezel")
     ap.add_argument("--time-font", help="typeface for the main time (defaults to --font)")
     ap.add_argument("--variation", help="named instance to use for a variable font")
     ap.add_argument("--time-variation", help="named instance for the main time")
     ap.add_argument("--tracking", type=float, default=0.025,
                     help="letter-spacing to remove, as a fraction of cap height")
+    ap.add_argument("--colon-max", type=float, default=0.55,
+                    help="widest the colon may be, as a fraction of a digit's "
+                         "advance; mainly matters for monospaced faces")
+    ap.add_argument("--list-variations", action="store_true",
+                    help="print the named instances of --font and exit")
     args = ap.parse_args()
+
+    if args.list_variations:
+        face = ImageFont.truetype(args.font, 32)
+        try:
+            names = face.get_variation_names()
+        except OSError:
+            sys.exit("%s is not a variable font" % args.font)
+        for name in names:
+            print(name.decode() if isinstance(name, bytes) else name)
+        return
 
     time_font = args.time_font or args.font
     time_variation = args.time_variation or args.variation
@@ -276,7 +306,7 @@ def main():
 
             px, cap, glyphs, width = build_role(
                 path, variation, role, chars, spec["probe"], budget[role],
-                int(spec["cap_frac"] * size), args.tracking,
+                int(spec["cap_frac"] * size), args.tracking, args.colon_max,
             )
             page, placed = pack(glyphs, chars)
             page_file = "%s.png" % role

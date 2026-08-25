@@ -94,8 +94,8 @@ def marker(draw_canvas, cx, cy, r, deg, char, font, color, ring):
         [tip, (base[0] + half * c, base[1] + half * s),
          (base[0] - half * c, base[1] - half * s)], fill=color)
 
-    cr = CHAR_R * r - ring * (font.line_height + 2)
-    font.draw(draw_canvas, int(cx + cr * s), int(cy - cr * c - font.line_height / 2),
+    cr = CHAR_R * r - ring * (font.base + 2)
+    font.draw(draw_canvas, int(cx + cr * s), int(cy - cr * c - font.base / 2),
               char, color, center=True)
 
 
@@ -130,7 +130,7 @@ def main():
         wc = f_zone.width(ch)
         wt = f_zone.width(fmt(hh, mm))
         x = int(cxx - (wc + gap + wt) / 2)
-        y = int(cyy - f_zone.line_height / 2)
+        y = int(cyy - f_zone.base / 2)
         f_zone.draw(img, x, y, ch, DAY if is_day else NIGHT)
         f_zone.draw(img, x + wc + gap, y, fmt(hh, mm), FG_ZONE)
 
@@ -150,12 +150,12 @@ def main():
         sub_display(cx, ROW_ABOVE * h, *zones[0])
 
     # --- main time ---------------------------------------------------------
-    f_time.draw(img, int(cx), int(TIME_ROW * h - f_time.line_height / 2),
+    f_time.draw(img, int(cx), int(TIME_ROW * h - f_time.base / 2),
                 fmt(local[1], local[2]), FG_TIME, center=True)
 
     # --- seconds (active display only) -------------------------------------
     if args.seconds and not args.aod:
-        f_zone.draw(img, int(cx), int(SEC_ROW * h - f_zone.line_height / 2),
+        f_zone.draw(img, int(cx), int(SEC_ROW * h - f_zone.base / 2),
                     "07", FG_SEC, center=True)
 
     # --- sub-displays below ------------------------------------------------
