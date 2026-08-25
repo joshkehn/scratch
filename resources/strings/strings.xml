@@ -1,0 +1,22 @@
+<strings>
+    <string id="AppName">Zones</string>
+
+    <string id="PrefixPrompt">One letter or digit. It labels this zone on the bezel. Leave empty to hide the zone.</string>
+    <string id="OffsetPrompt">Hours east of UTC, e.g. -5 for New York, 5.5 for Delhi. Daylight saving is not applied.</string>
+    <string id="PositionPrompt">Latitude,longitude e.g. 51.5,-0.13. Used for sunrise and sunset. Leave empty to treat 06:00-18:00 as daylight.</string>
+
+    <string id="HomePrefix">Watch timezone letter</string>
+    <string id="HomePosition">Watch timezone position</string>
+
+    <string id="Zone1Prefix">Zone 1 letter</string>
+    <string id="Zone1Offset">Zone 1 UTC offset</string>
+    <string id="Zone1Position">Zone 1 position</string>
+
+    <string id="Zone2Prefix">Zone 2 letter</string>
+    <string id="Zone2Offset">Zone 2 UTC offset</string>
+    <string id="Zone2Position">Zone 2 position</string>
+
+    <string id="Zone3Prefix">Zone 3 letter</string>
+    <string id="Zone3Offset">Zone 3 UTC offset</string>
+    <string id="Zone3Position">Zone 3 position</string>
+</strings>

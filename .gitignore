@@ -1,2 +1,10 @@
 .env
 .DS_Store
+
+# Connect IQ build output
+bin/
+*.iq
+*.prg
+*.prg.debug.xml
+
+__pycache__/

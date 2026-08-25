@@ -1,0 +1,4 @@
+<fonts>
+    <font id="TimeFont" filename="time.fnt" antialias="true" filter="0123456789:" />
+    <font id="ZoneFont" filename="zone.fnt" antialias="true" filter=" 0123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZ" />
+</fonts>

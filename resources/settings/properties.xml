@@ -1,0 +1,21 @@
+<properties>
+    <!-- The watch's own timezone. Its time is the big one in the middle; the
+         letter only labels its marker on the bezel. -->
+    <property id="homePrefix" type="string">H</property>
+    <property id="homePosition" type="string"></property>
+
+    <!-- Up to three alternates. A zone is shown only if it has a letter.
+         Offsets are hours east of UTC and do not follow daylight saving:
+         set 1 for Berlin in winter, 2 in summer. -->
+    <property id="zone1Prefix" type="string">U</property>
+    <property id="zone1Offset" type="float">0.0</property>
+    <property id="zone1Position" type="string"></property>
+
+    <property id="zone2Prefix" type="string"></property>
+    <property id="zone2Offset" type="float">0.0</property>
+    <property id="zone2Position" type="string"></property>
+
+    <property id="zone3Prefix" type="string"></property>
+    <property id="zone3Offset" type="float">0.0</property>
+    <property id="zone3Position" type="string"></property>
+</properties>

@@ -1,0 +1,49 @@
+<settings>
+    <setting propertyKey="@Properties.homePrefix" title="@Strings.HomePrefix"
+             prompt="@Strings.PrefixPrompt">
+        <settingConfig type="alphaNumeric" maxLength="1" />
+    </setting>
+    <setting propertyKey="@Properties.homePosition" title="@Strings.HomePosition"
+             prompt="@Strings.PositionPrompt">
+        <settingConfig type="alphaNumeric" maxLength="24" required="false" />
+    </setting>
+
+    <setting propertyKey="@Properties.zone1Prefix" title="@Strings.Zone1Prefix"
+             prompt="@Strings.PrefixPrompt">
+        <settingConfig type="alphaNumeric" maxLength="1" required="false" />
+    </setting>
+    <setting propertyKey="@Properties.zone1Offset" title="@Strings.Zone1Offset"
+             prompt="@Strings.OffsetPrompt">
+        <settingConfig type="numeric" />
+    </setting>
+    <setting propertyKey="@Properties.zone1Position" title="@Strings.Zone1Position"
+             prompt="@Strings.PositionPrompt">
+        <settingConfig type="alphaNumeric" maxLength="24" required="false" />
+    </setting>
+
+    <setting propertyKey="@Properties.zone2Prefix" title="@Strings.Zone2Prefix"
+             prompt="@Strings.PrefixPrompt">
+        <settingConfig type="alphaNumeric" maxLength="1" required="false" />
+    </setting>
+    <setting propertyKey="@Properties.zone2Offset" title="@Strings.Zone2Offset"
+             prompt="@Strings.OffsetPrompt">
+        <settingConfig type="numeric" />
+    </setting>
+    <setting propertyKey="@Properties.zone2Position" title="@Strings.Zone2Position"
+             prompt="@Strings.PositionPrompt">
+        <settingConfig type="alphaNumeric" maxLength="24" required="false" />
+    </setting>
+
+    <setting propertyKey="@Properties.zone3Prefix" title="@Strings.Zone3Prefix"
+             prompt="@Strings.PrefixPrompt">
+        <settingConfig type="alphaNumeric" maxLength="1" required="false" />
+    </setting>
+    <setting propertyKey="@Properties.zone3Offset" title="@Strings.Zone3Offset"
+             prompt="@Strings.OffsetPrompt">
+        <settingConfig type="numeric" />
+    </setting>
+    <setting propertyKey="@Properties.zone3Position" title="@Strings.Zone3Position"
+             prompt="@Strings.PositionPrompt">
+        <settingConfig type="alphaNumeric" maxLength="24" required="false" />
+    </setting>
+</settings>
